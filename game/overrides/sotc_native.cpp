@@ -1690,7 +1690,12 @@ namespace sotc_native
         float model[16];
         for (int i = 0; i < 16; ++i)
             model[i] = real(matrix + i * 4u);
-        g_modelDisp(rdram, ctx, runtime); // the emulated drawing goes on as before
+        ps2_stats::modelDispCalls.fetch_add(1, std::memory_order_relaxed);
+        {
+            ps2_stats::TimeInto timed{ps2_stats::guestModelDispUs};
+            g_modelDisp(rdram, ctx, runtime); // the emulated drawing goes on as before
+        }
+        ps2_stats::TimeInto timedNative{ps2_stats::nativeModelUs};
         if (!g_cameraContext)
             return;
 

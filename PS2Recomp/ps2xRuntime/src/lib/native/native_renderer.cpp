@@ -3,9 +3,11 @@
 // the GL path against Metal); the Vita: OpenGL (vitaGL); elsewhere none.
 #include "native_backend.h"
 #include "runtime/native_tuning.h"
+#include "runtime/ps2_stats.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -429,7 +431,14 @@ namespace native_renderer
     {
         bool on = std::getenv("SOTC_NATIVE_LOG_UPLOADS") != nullptr;
         uint64_t frames = 0, staticMeshes = 0, staticBytes = 0, frameMeshes = 0, frameBytes = 0, textures = 0, textureBytes = 0, draws = 0;
+        // Where a frame's time goes (us): the whole frame (endFrame to
+        // endFrame), the backend's endFrame (GL), uploads; the worst frame.
+        uint64_t frameUs = 0, renderUs = 0, textureUs = 0, meshUs = 0, worstFrameUs = 0, worstRenderUs = 0, lastEnd = 0;
     } g_uploads;
+    static uint64_t frameClockUs()
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
     void uploadMesh(uint64_t id, const Vertex *vertices, uint32_t count, bool perFrame)
     {
         if (g_uploads.on)
@@ -437,8 +446,11 @@ namespace native_renderer
             (perFrame ? g_uploads.frameMeshes : g_uploads.staticMeshes) += 1;
             (perFrame ? g_uploads.frameBytes : g_uploads.staticBytes) += static_cast<uint64_t>(count) * sizeof(Vertex);
         }
+        const uint64_t start = g_uploads.on ? frameClockUs() : 0;
         if (backend())
             g_backend->uploadMesh(id, vertices, count, perFrame);
+        if (g_uploads.on)
+            g_uploads.meshUs += frameClockUs() - start;
     }
     bool hasTexture(uint64_t id) { return backend() && g_backend->hasTexture(id); }
     void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels)
@@ -448,8 +460,11 @@ namespace native_renderer
             ++g_uploads.textures;
             g_uploads.textureBytes += static_cast<uint64_t>(width) * height * 4u;
         }
+        const uint64_t start = g_uploads.on ? frameClockUs() : 0;
         if (backend())
             g_backend->uploadTexture(id, width, height, rgba, levels);
+        if (g_uploads.on)
+            g_uploads.textureUs += frameClockUs() - start;
     }
     void beginFrame()
     {
@@ -505,15 +520,48 @@ namespace native_renderer
     }
     void endFrame(uint32_t width, uint32_t height)
     {
+        const uint64_t start = g_uploads.on ? frameClockUs() : 0;
         if (backend())
             g_backend->endFrame(width, height);
+        if (g_uploads.on)
+        {
+            UploadStats &u = g_uploads;
+            const uint64_t end = frameClockUs(), render = end - start;
+            u.renderUs += render;
+            u.worstRenderUs = std::max(u.worstRenderUs, render);
+            if (u.lastEnd)
+            {
+                // A hitch, logged as it happens (what else the log says then).
+                if (end - u.lastEnd > 250000u)
+                    std::fprintf(stderr, "[hitch] frame %llu took %.0f ms (render %.1f ms)\n", static_cast<unsigned long long>(u.frames),
+                                 (end - u.lastEnd) / 1000.0, render / 1000.0);
+                u.frameUs += end - u.lastEnd;
+                u.worstFrameUs = std::max(u.worstFrameUs, end - u.lastEnd);
+            }
+            u.lastEnd = end;
+        }
         if (g_uploads.on && ++g_uploads.frames % 60u == 0u)
         {
             UploadStats &u = g_uploads;
             std::fprintf(stderr, "[uploads] per frame: static meshes %.1f (%.0f KB), per-frame meshes %.1f (%.0f KB), textures %.2f (%.0f KB), draws %.0f\n",
                          u.staticMeshes / 60.0, u.staticBytes / 60.0 / 1024.0, u.frameMeshes / 60.0, u.frameBytes / 60.0 / 1024.0,
                          u.textures / 60.0, u.textureBytes / 60.0 / 1024.0, u.draws / 60.0);
+            // frame = game + render; game is the rest (guest code, display list
+            // parsing, skinning, uploads).
+            std::fprintf(stderr, "[frametime] ms per frame: frame %.1f render %.1f (worst %.1f) texUpload %.2f meshUpload %.2f game %.1f | worst frame %.1f\n",
+                         u.frameUs / 60000.0, u.renderUs / 60000.0, u.worstRenderUs / 1000.0, u.textureUs / 60000.0, u.meshUs / 60000.0,
+                         (static_cast<double>(u.frameUs) - static_cast<double>(u.renderUs)) / 60000.0, u.worstFrameUs / 1000.0);
+            std::fprintf(stderr, "[framesplit] ms per frame: modelDisp guest %.1f native %.1f (%.0f calls) dlKick %.1f | disc reads %.1f ms (%.1f reads, %.0f KB)\n",
+                         ps2_stats::guestModelDispUs.exchange(0) / 60000.0, ps2_stats::nativeModelUs.exchange(0) / 60000.0,
+                         ps2_stats::modelDispCalls.exchange(0) / 60.0, ps2_stats::dlKickUs.exchange(0) / 60000.0,
+                         ps2_stats::discReadUs.exchange(0) / 60000.0, ps2_stats::discReads.exchange(0) / 60.0,
+                         ps2_stats::discReadBytes.exchange(0) / 60.0 / 1024.0);
+            std::fprintf(stderr, "[framewait] ms per frame: vu1 sync %.1f (%.1f waits) gs priv reads %.1f (%.1f reads) | guest calls %.0f checkpoints %.0f\n",
+                         ps2_stats::vu1SyncWaitUs.exchange(0) / 60000.0, ps2_stats::vu1SyncWaits.exchange(0) / 60.0, ps2_stats::gsPrivReadUs.exchange(0) / 60000.0,
+                         ps2_stats::gsPrivReads.exchange(0) / 60.0, ps2_stats::guestCalls / 60.0, ps2_stats::guestCheckpoints / 60.0);
+            ps2_stats::guestCalls = ps2_stats::guestCheckpoints = 0;
             u.staticMeshes = u.staticBytes = u.frameMeshes = u.frameBytes = u.textures = u.textureBytes = u.draws = 0;
+            u.frameUs = u.renderUs = u.textureUs = u.meshUs = u.worstFrameUs = u.worstRenderUs = 0;
         }
     }
     void setShown(bool shown) { g_shown.store(shown, std::memory_order_relaxed); }

@@ -363,6 +363,8 @@ void PS2Memory::mtvuWorkDone()
 
 void PS2Memory::mtvuSyncSlow()
 {
+    ps2_stats::TimeInto timed{ps2_stats::vu1SyncWaitUs};
+    ps2_stats::vu1SyncWaits.fetch_add(1, std::memory_order_relaxed);
     ps2_load::Wait waiting;
     std::unique_lock<std::mutex> lock(m_mtvuMutex);
     m_mtvuIdle.wait(lock, [this]
@@ -1002,6 +1004,8 @@ uint64_t PS2Memory::read64(uint32_t address)
 
     if (isGsPrivReg(address))
     {
+        ps2_stats::TimeInto timed{ps2_stats::gsPrivReadUs};
+        ps2_stats::gsPrivReads.fetch_add(1, std::memory_order_relaxed);
         syncVu1();
         const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
         if (regOff == kGsCsrRegOffset)

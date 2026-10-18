@@ -1,5 +1,7 @@
 #pragma once
 
+#include "runtime/ps2_stats.h"
+
 #include "ps2_runtime.h"
 
 #include <array>
@@ -20,6 +22,7 @@
 // not an error and must only be caught at EeScheduler::run().
 struct EeDispatcherTransfer final
 {
+    uint64_t thrownUs = ps2_stats::nowUs(); // the unwind's cost: [stats] eeTransfers
 };
 
 enum class EeThreadStatus : uint8_t

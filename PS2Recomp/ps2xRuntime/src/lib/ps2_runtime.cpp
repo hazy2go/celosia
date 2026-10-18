@@ -1415,10 +1415,19 @@ const char *describeGuestBranchKind(PS2Runtime::GuestBranchKind kind)
 namespace
 {
     // PS2X_DISPATCH_PROFILE: per-address counts of dispatched guest functions.
+    // Asked at every dispatch: no function-local static (its guard is an
+    // acquire, a dmb on the Vita, per call). Guest code runs on one thread.
+    std::vector<uint32_t> g_dispatchProfileCounts;
+    int g_dispatchProfileState = -1; // unknown, off, on
     std::vector<uint32_t> &dispatchProfile()
     {
-        static std::vector<uint32_t> counts(std::getenv("PS2X_DISPATCH_PROFILE") ? (PS2_RAM_SIZE >> 2) : 0u);
-        return counts;
+        if (g_dispatchProfileState < 0)
+        {
+            g_dispatchProfileState = std::getenv("PS2X_DISPATCH_PROFILE") ? 1 : 0;
+            if (g_dispatchProfileState)
+                g_dispatchProfileCounts.assign(PS2_RAM_SIZE >> 2, 0u);
+        }
+        return g_dispatchProfileCounts;
     }
 }
 
@@ -1697,6 +1706,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         return false;
     }
 
+    ++ps2_stats::guestCalls;
     if (!isCall)
     {
         ++t_guestJumpSerial;
@@ -1709,7 +1719,19 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         return false;
     }
 
-    if (!hasFunction(targetPc))
+    // The common case in one table read (hasFunction and lookupFunction
+    // were two calls each time).
+    RecompiledFunction targetFn = nullptr;
+    if (uint32_t slot = 0u; generatedFunctionTableSlot(targetPc, slot))
+        targetFn = g_ps2RecompiledFunctionTable[slot];
+    if (targetFn != nullptr)
+    {
+        pushDispatchPc(targetPc);
+        if (g_dispatchProfileState != 0)
+            if (auto &counts = dispatchProfile(); !counts.empty())
+                ++counts[(targetPc & (PS2_RAM_SIZE - 1u)) >> 2];
+    }
+    else if (!hasFunction(targetPc))
     {
         reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
 
@@ -1731,7 +1753,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         return false;
     }
 
-    RecompiledFunction targetFn = lookupFunction(targetPc);
+    if (targetFn == nullptr)
+        targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
     const uint64_t jumpSerial = t_guestJumpSerial;
     targetFn(rdram, ctx, this);
@@ -2859,12 +2882,17 @@ void PS2Runtime::run()
                 if (now - lastWrite >= std::chrono::seconds(5))
                 {
                     lastWrite = now;
-                    if (FILE *f = std::fopen(path.c_str(), "w"))
+                    // Written aside, then renamed: a run stopped mid-write
+                    // keeps the last whole profile.
+                    const std::string partial = path + ".tmp";
+                    if (FILE *f = std::fopen(partial.c_str(), "w"))
                     {
                         std::fprintf(f, "total %llu\nidle %llu\n", static_cast<unsigned long long>(total), static_cast<unsigned long long>(idle));
                         for (const auto &[key, n] : samples)
                             std::fprintf(f, "%08x %08x %llu\n", static_cast<uint32_t>(key >> 32), static_cast<uint32_t>(key), static_cast<unsigned long long>(n));
                         std::fclose(f);
+                        std::remove(path.c_str());
+                        std::rename(partial.c_str(), path.c_str());
                     }
                 }
             } })
@@ -3034,89 +3062,109 @@ void PS2Runtime::run()
             static uint64_t lastStatChains = 0;
             static uint64_t lastHostFrames = 0;
             const uint64_t statChains = ps2_stats::vif1Chains.load(std::memory_order_relaxed);
-            std::cerr << "[stats] t=" << static_cast<int>(GetTime())
-                      << " gameFps=" << (statChains - lastStatChains) / 5.0
-                      << " shownFps=" << ps2_stats::presentedFrames.exchange(0) / 5.0
-                      << " frames=" << statChains
-                      << []
-                      {
-                          // Frame timeline averages (ms): vu1 (its idle part) / gs tail / rest, and GS backend waits.
-                          const uint64_t n = ps2_stats::tlFrames.exchange(0);
-                          const uint64_t vu1 = ps2_stats::tlVu1Us.exchange(0), vu1Idle = ps2_stats::tlVu1IdleUs.exchange(0),
-                                         gs = ps2_stats::tlGsUs.exchange(0), rest = ps2_stats::tlRestUs.exchange(0);
-                          const uint64_t space = ps2_stats::gsSpaceWaitUs.exchange(0), drains = ps2_stats::gsDrainWaitUs.exchange(0),
-                                         drainCount = ps2_stats::gsDrains.exchange(0), gsBusy = ps2_stats::gsWorkerBusyUs.exchange(0);
-                          static const char *const kKinds[] = {"draw", "clut", "xfer", "upload", "texflush", "wvram", "clear", "present", "vu"};
-                          std::string kinds;
-                          for (int k = 0; k < 9; ++k)
+#if defined(PLATFORM_VITA)
+            // The full line (VU1, VIF, GS counters) is long and every thread
+            // waits on the log while it goes to the memory card: PS2X_STATS.
+            static const bool verboseStats = std::getenv("PS2X_STATS") != nullptr;
+#else
+            constexpr bool verboseStats = true;
+#endif
+            if (!verboseStats)
+            {
+                std::fprintf(stderr, "[stats] t=%d gameFps=%.1f eeTransfers/s=%.1f\n", static_cast<int>(GetTime()), (statChains - lastStatChains) / 5.0,
+                             ps2_stats::eeTransfers.exchange(0) / 5.0);
+                ps2_stats::eeTransferUs.store(0, std::memory_order_relaxed);
+                lastStatChains = statChains;
+                lastHostFrames = hostFrames;
+            }
+            else
+            {
+                std::cerr << "[stats] t=" << static_cast<int>(GetTime())
+                          << " gameFps=" << (statChains - lastStatChains) / 5.0
+                          << " shownFps=" << ps2_stats::presentedFrames.exchange(0) / 5.0
+                          << " frames=" << statChains
+                          << []
                           {
-                              const uint64_t us = ps2_stats::gsKindUs[k].exchange(0);
-                              if (n && us / n >= 100)
+                              // Frame timeline averages (ms): vu1 (its idle part) / gs tail / rest, and GS backend waits.
+                              const uint64_t n = ps2_stats::tlFrames.exchange(0);
+                              const uint64_t vu1 = ps2_stats::tlVu1Us.exchange(0), vu1Idle = ps2_stats::tlVu1IdleUs.exchange(0),
+                                             gs = ps2_stats::tlGsUs.exchange(0), rest = ps2_stats::tlRestUs.exchange(0);
+                              const uint64_t space = ps2_stats::gsSpaceWaitUs.exchange(0), drains = ps2_stats::gsDrainWaitUs.exchange(0),
+                                             drainCount = ps2_stats::gsDrains.exchange(0), gsBusy = ps2_stats::gsWorkerBusyUs.exchange(0);
+                              static const char *const kKinds[] = {"draw", "clut", "xfer", "upload", "texflush", "wvram", "clear", "present", "vu"};
+                              std::string kinds;
+                              for (int k = 0; k < 9; ++k)
                               {
-                                  char part[48];
-                                  std::snprintf(part, sizeof(part), " %s=%.1f", kKinds[k], us / 1000.0 / n);
-                                  kinds += part;
+                                  const uint64_t us = ps2_stats::gsKindUs[k].exchange(0);
+                                  if (n && us / n >= 100)
+                                  {
+                                      char part[48];
+                                      std::snprintf(part, sizeof(part), " %s=%.1f", kKinds[k], us / 1000.0 / n);
+                                      kinds += part;
+                                  }
                               }
-                          }
-                          for (int k = 0; k < 3; ++k)
+                              for (int k = 0; k < 3; ++k)
+                              {
+                                  static const char *const kParts[] = {"xferFlush", "xferHw", "xferSoft"};
+                                  const uint64_t us = ps2_stats::gsXferUs[k].exchange(0);
+                                  if (n)
+                                  {
+                                      char part[48];
+                                      std::snprintf(part, sizeof(part), " %s=%.1f", kParts[k], us / 1000.0 / n);
+                                      kinds += part;
+                                  }
+                              }
+                              if (n == 0)
+                                  return std::string();
+                              char text[256];
+                              std::snprintf(text, sizeof(text), " tl=%.1f(idle %.1f)/%.1f/%.1f gsWait(space %.1f drain %.1f x%.1f) gsBusy=%.1f", vu1 / 1000.0 / n,
+                                            vu1Idle / 1000.0 / n, gs / 1000.0 / n, rest / 1000.0 / n, space / 1000.0 / n, drains / 1000.0 / n,
+                                            static_cast<double>(drainCount) / n, gsBusy / 1000.0 / n);
+                              return std::string(text) + " gsKinds(" + kinds + " )";
+                          }()
+                          << [this]
                           {
-                              static const char *const kParts[] = {"xferFlush", "xferHw", "xferSoft"};
-                              const uint64_t us = ps2_stats::gsXferUs[k].exchange(0);
-                              if (n)
-                              {
-                                  char part[48];
-                                  std::snprintf(part, sizeof(part), " %s=%.1f", kParts[k], us / 1000.0 / n);
-                                  kinds += part;
-                              }
-                          }
-                          if (n == 0)
-                              return std::string();
-                          char text[256];
-                          std::snprintf(text, sizeof(text), " tl=%.1f(idle %.1f)/%.1f/%.1f gsWait(space %.1f drain %.1f x%.1f) gsBusy=%.1f", vu1 / 1000.0 / n,
-                                        vu1Idle / 1000.0 / n, gs / 1000.0 / n, rest / 1000.0 / n, space / 1000.0 / n, drains / 1000.0 / n,
-                                        static_cast<double>(drainCount) / n, gsBusy / 1000.0 / n);
-                          return std::string(text) + " gsKinds(" + kinds + " )";
-                      }()
-                      << [this]
-                      {
-                          // PS2X_STATS_CLOCK=<addr>:<ticks per second>: speed of a guest
-                          // 64-bit clock against real time (SotC: 0x1F8A98:147456000).
-                          static const char *spec = std::getenv("PS2X_STATS_CLOCK");
-                          if (!spec)
-                              return std::string();
-                          static uint64_t last = 0;
-                          const uint32_t addr = static_cast<uint32_t>(std::strtoul(spec, nullptr, 0));
-                          const char *colon = std::strchr(spec, ':');
-                          const double rate = colon ? std::atof(colon + 1) : 1.0;
-                          uint64_t now = 0;
-                          std::memcpy(&now, m_memory.getRDRAM() + (addr & 0x1FFFFFFu), sizeof(now));
-                          const double speed = last ? (now - last) / rate / 5.0 : 0.0;
-                          last = now;
-                          return " clock=" + std::to_string(speed).substr(0, 5) + "x";
-                      }()
-                      << " holds(1/2/3/4+)=" << ps2_stats::frameHolds[0].exchange(0) << "/" << ps2_stats::frameHolds[1].exchange(0)
-                      << "/" << ps2_stats::frameHolds[2].exchange(0) << "/" << ps2_stats::frameHolds[3].exchange(0)
-                      << " mscal=" << ps2_stats::vu1Mscal.exchange(0)
-                      << " vu1Instr=" << ps2_stats::vu1Instr.exchange(0)
-                      << " vu1Stall=" << ps2_stats::vu1StallCycles.exchange(0)
-                      << " vu1Rec=" << ps2_stats::vu1RecRuns.exchange(0) << "/" << ps2_stats::vu1RecBails.exchange(0)
-                      << "/" << ps2_stats::vu1InterpRuns.exchange(0)
-                      << " xgkick=" << ps2_stats::vu1Xgkick.exchange(0)
-                      << " direct=" << ps2_stats::vu1DirectBatches.exchange(0)
-                      << " mscnt=" << ps2_stats::vu1Mscnt.exchange(0)
-                      << " unpack=" << ps2_stats::vifUnpack.exchange(0)
-                      << " vif1KB=" << (ps2_stats::vif1Bytes.exchange(0) >> 10)
-                      << " prims(pt,ln,lstrip,tri,tstrip,tfan,sprite)=";
-            for (int i = 0; i < 7; ++i)
-                std::cerr << ps2_stats::gsPrims[i].exchange(0) << (i < 6 ? "," : "");
-            lastStatChains = statChains;
-            lastHostFrames = hostFrames;
-            dumpDispatchProfile();
-            std::cerr << " vif:";
-            for (int op = 0; op < 128; ++op)
-                if (const uint64_t n = ps2_stats::vifOpcodes[op].exchange(0))
-                    std::cerr << " " << std::hex << op << std::dec << "=" << n;
-            std::cerr << std::endl;
+                              // PS2X_STATS_CLOCK=<addr>:<ticks per second>: speed of a guest
+                              // 64-bit clock against real time (SotC: 0x1F8A98:147456000).
+                              static const char *spec = std::getenv("PS2X_STATS_CLOCK");
+                              if (!spec)
+                                  return std::string();
+                              static uint64_t last = 0;
+                              const uint32_t addr = static_cast<uint32_t>(std::strtoul(spec, nullptr, 0));
+                              const char *colon = std::strchr(spec, ':');
+                              const double rate = colon ? std::atof(colon + 1) : 1.0;
+                              uint64_t now = 0;
+                              std::memcpy(&now, m_memory.getRDRAM() + (addr & 0x1FFFFFFu), sizeof(now));
+                              const double speed = last ? (now - last) / rate / 5.0 : 0.0;
+                              last = now;
+                              return " clock=" + std::to_string(speed).substr(0, 5) + "x";
+                          }()
+                          << " eeTransfers/s=" << ps2_stats::eeTransfers.exchange(0) / 5.0
+                          << " unwindMs/s=" << ps2_stats::eeTransferUs.exchange(0) / 5000.0
+                          << " holds(1/2/3/4+)=" << ps2_stats::frameHolds[0].exchange(0) << "/" << ps2_stats::frameHolds[1].exchange(0)
+                          << "/" << ps2_stats::frameHolds[2].exchange(0) << "/" << ps2_stats::frameHolds[3].exchange(0)
+                          << " mscal=" << ps2_stats::vu1Mscal.exchange(0)
+                          << " vu1Instr=" << ps2_stats::vu1Instr.exchange(0)
+                          << " vu1Stall=" << ps2_stats::vu1StallCycles.exchange(0)
+                          << " vu1Rec=" << ps2_stats::vu1RecRuns.exchange(0) << "/" << ps2_stats::vu1RecBails.exchange(0)
+                          << "/" << ps2_stats::vu1InterpRuns.exchange(0)
+                          << " xgkick=" << ps2_stats::vu1Xgkick.exchange(0)
+                          << " direct=" << ps2_stats::vu1DirectBatches.exchange(0)
+                          << " mscnt=" << ps2_stats::vu1Mscnt.exchange(0)
+                          << " unpack=" << ps2_stats::vifUnpack.exchange(0)
+                          << " vif1KB=" << (ps2_stats::vif1Bytes.exchange(0) >> 10)
+                          << " prims(pt,ln,lstrip,tri,tstrip,tfan,sprite)=";
+                for (int i = 0; i < 7; ++i)
+                    std::cerr << ps2_stats::gsPrims[i].exchange(0) << (i < 6 ? "," : "");
+                lastStatChains = statChains;
+                lastHostFrames = hostFrames;
+                dumpDispatchProfile();
+                std::cerr << " vif:";
+                for (int op = 0; op < 128; ++op)
+                    if (const uint64_t n = ps2_stats::vifOpcodes[op].exchange(0))
+                        std::cerr << " " << std::hex << op << std::dec << "=" << n;
+                std::cerr << std::endl;
+            }
         }
 
         // PS2X_DUMP_GS_BUFFERS_AT=<s> PS2X_DUMP_GS_BUFFERS="psm:block:bw:w:h;...":

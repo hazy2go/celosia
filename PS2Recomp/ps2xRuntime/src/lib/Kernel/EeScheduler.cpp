@@ -216,8 +216,9 @@ void EeScheduler::run()
             {
                 completion(running->activeContext());
             }
-            catch (const EeDispatcherTransfer &)
+            catch (const EeDispatcherTransfer &transfer)
             {
+                ps2_stats::transferCaught(transfer.thrownUs);
             }
             if (m_currentThreadId == 0)
             {
@@ -254,8 +255,9 @@ void EeScheduler::run()
                     {
                         completed.onComplete(completed.context, running->activeContext());
                     }
-                    catch (const EeDispatcherTransfer &)
+                    catch (const EeDispatcherTransfer &transfer)
                     {
+                        ps2_stats::transferCaught(transfer.thrownUs);
                     }
                 }
                 continue;
@@ -319,7 +321,7 @@ void EeScheduler::run()
                 // PS2X_SCHED_STATS=1: what changes the VU0 owner (thread or
                 // invocation switches), per second, by thread and guest PC.
 #if defined(PLATFORM_VITA)
-                static const bool schedStats = true;
+                static const bool schedStats = std::getenv("PS2X_STATS") != nullptr; // on the game thread: it waited on the log
 #else
                 static const bool schedStats = std::getenv("PS2X_SCHED_STATS") != nullptr;
 #endif
@@ -363,8 +365,9 @@ void EeScheduler::run()
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
         }
-        catch (const EeDispatcherTransfer &)
+        catch (const EeDispatcherTransfer &transfer)
         {
+            ps2_stats::transferCaught(transfer.thrownUs);
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
         }
@@ -419,18 +422,25 @@ void EeScheduler::postEvent(EeEvent event)
 
 bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
 {
+    ++ps2_stats::guestCheckpoints;
     accountCycles(cycles);
 
-    if (m_checkpointPending.load(std::memory_order_acquire) ||
-        m_stopRequested.load(std::memory_order_acquire))
+    // Polled at every guest call and loop edge: plain loads (an acquire is a
+    // dmb on ARMv7, tens of cycles on the Vita's Cortex-A9 each time), and
+    // the acquire fence only on the way out, before the dispatcher acts on
+    // what was published.
+    if (m_checkpointPending.load(std::memory_order_relaxed) ||
+        m_stopRequested.load(std::memory_order_relaxed))
     {
+        std::atomic_thread_fence(std::memory_order_acquire);
         m_unwinding = true;
         return true;
     }
 
-    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_acquire);
+    const uint64_t nextEventCycle = m_nextDeadlineCycle.load(std::memory_order_relaxed);
     if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
     {
+        std::atomic_thread_fence(std::memory_order_acquire);
         m_checkpointPending.store(true, std::memory_order_release);
         m_unwinding = true;
         return true;

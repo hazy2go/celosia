@@ -704,6 +704,7 @@ namespace
         }
         void dmaSendPath1(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
+            ps2_stats::TimeInto timed{ps2_stats::dlKickUs};
             if (!runtime->memory().hostDrawPathsIdle())
             {
                 g_dmaSendPath1(rdram, ctx, runtime); // the game's own wait
