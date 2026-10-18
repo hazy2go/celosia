@@ -6,6 +6,8 @@
 #include <SDL2/SDL.h>
 #include <vitaGL.h>
 #include <psp2/ctrl.h>
+#include <psp2/kernel/processmgr.h>
+#include <psp2/power.h>
 #include <psp2/touch.h>
 
 #include <algorithm>
@@ -112,12 +114,24 @@ namespace
     }
 }
 
+void runVitaMicrobench(); // ps2_vita_microbench.cpp (CELOSIA_MICROBENCH)
+
 void InitWindow(int, int, const char *)
 {
     // The Vita screen, whatever size the host asked for.
     const int width = 960, height = 544;
     g_width = width;
     g_height = height;
+    // Apps start at 333 MHz ARM with the GPU clocked down; the game needs all
+    // of it. The highest clocks the Vita runs homebrew at, and what Vita3K
+    // was measured with (444 MHz).
+    scePowerSetArmClockFrequency(444);
+    scePowerSetBusClockFrequency(222);
+    scePowerSetGpuClockFrequency(222);
+    scePowerSetGpuXbarClockFrequency(166);
+    std::fprintf(stderr, "[vita] clocks arm=%d bus=%d gpu=%d xbar=%d MHz\n", scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(),
+                 scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency());
+    runVitaMicrobench();
     if (SDL_Init(SDL_INIT_AUDIO) != 0)
         std::fprintf(stderr, "[vita] SDL_Init failed: %s\n", SDL_GetError());
     // Shaders are compiled at run time (libshacccg); fast math is fine here.
@@ -200,19 +214,46 @@ void EndDrawing(void)
     if (g_glReady)
         vglSwapBuffers(GL_FALSE);
     ps2xVitaGlMutex().unlock();
-    // Logs go to files on ux0: keep them current in case the app is killed.
-    std::fflush(stdout);
-    std::fflush(stderr);
     ++g_framesThisSecond;
     const double now = GetTime();
+    // The game is active even without input (cutscenes, the attract demo):
+    // no dimming, no standby.
+    static double nextPowerTick = 0.0;
+    if (now >= nextPowerTick)
+    {
+        nextPowerTick = now + 1.0;
+        sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);
+    }
+    // Frame pacing: the longest gap between shown frames and the hitches
+    // (over 50 / 100 ms), logged with the memory line every 5 s.
+    static double lastFrame = 0.0, worstGap = 0.0;
+    static unsigned hitches50 = 0, hitches100 = 0, framesShown = 0;
+    if (lastFrame > 0.0)
+    {
+        const double gap = now - lastFrame;
+        worstGap = std::max(worstGap, gap);
+        hitches50 += gap > 0.050;
+        hitches100 += gap > 0.100;
+    }
+    lastFrame = now;
+    ++framesShown;
     static double nextMemLog = 0.0;
     if (now >= nextMemLog)
     {
         nextMemLog = now + 5.0;
+        std::fprintf(stderr, "[vita:frame] t=%.0f shown=%.1f fps worst=%.0f ms hitches>50ms=%u >100ms=%u\n", now, framesShown / 5.0,
+                     worstGap * 1000.0, hitches50, hitches100);
+        worstGap = 0.0;
+        hitches50 = hitches100 = framesShown = 0;
         const struct mallinfo mi = mallinfo();
         std::fprintf(stderr, "[vita:mem] t=%.0f heap used=%.1f MB arena=%.1f MB | vgl vram=%.1f/%.1f ram=%.1f/%.1f MB\n", now,
                      mi.uordblks / 1048576.0, mi.arena / 1048576.0, vglMemFree(VGL_MEM_VRAM) / 1048576.0, vglMemTotal(VGL_MEM_VRAM) / 1048576.0,
                      vglMemFree(VGL_MEM_RAM) / 1048576.0, vglMemTotal(VGL_MEM_RAM) / 1048576.0);
+        // Logs go to files on ux0, buffered: written out here every 5 s
+        // instead of a write per line from every thread (the card write
+        // stalled the frame). terminate() flushes what is left.
+        std::fflush(stdout);
+        std::fflush(stderr);
     }
     if (now - g_fpsWindowStart >= 1.0)
     {

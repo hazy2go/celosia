@@ -670,7 +670,10 @@ if(PS2X_IS_VITA)
         endif()
     endforeach()
     target_compile_options(ps2_runtime PRIVATE -O2)
-    target_compile_options(ps2EntryRunner PRIVATE -Os)
+    # CELOSIA_VITA_GAME_OPT: the recompiled game's optimisation (-Os by
+    # default; -O2 measured against it on the device).
+    set(CELOSIA_VITA_GAME_OPT "-Os" CACHE STRING "Optimisation flag for the recompiled game code on the Vita")
+    target_compile_options(ps2EntryRunner PRIVATE ${CELOSIA_VITA_GAME_OPT})
     # Except the hot few: recompiled VU1 microcode and native replacements
     # (game overrides) run every vertex.
     get_target_property(PS2X_RUNNER_SOURCES ps2EntryRunner SOURCES)
@@ -679,8 +682,10 @@ if(PS2X_IS_VITA)
             set_source_files_properties(${PS2X_SOURCE} PROPERTIES COMPILE_OPTIONS "-O2")
         endif()
     endforeach()
-    target_link_options(ps2EntryRunner PRIVATE "-Wl,--allow-multiple-definition")
-    target_sources(ps2EntryRunner PRIVATE src/lib/ps2_vita_runtime.cpp)
+    target_link_options(ps2EntryRunner PRIVATE "-Wl,--allow-multiple-definition"
+        "-Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/platform/vita/sce_gap.ld")
+    target_sources(ps2EntryRunner PRIVATE src/lib/ps2_vita_runtime.cpp src/lib/ps2_vita_microbench.cpp)
+    set_source_files_properties(src/lib/ps2_vita_microbench.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION TRUE)
     set_source_files_properties(src/lib/ps2_vita_runtime.cpp PROPERTIES
         SKIP_UNITY_BUILD_INCLUSION TRUE
         COMPILE_OPTIONS "-fno-lto"

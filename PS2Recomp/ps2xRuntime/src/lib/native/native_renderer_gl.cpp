@@ -24,6 +24,7 @@ std::recursive_mutex &ps2xVitaGlMutex();
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -1357,6 +1358,38 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             // into `color` before the GPU has put this one on the screen.
             shownIndex ^= 1;
             copy(colorPlain, shownFrame[shownIndex]);
+#if defined(PS2X_NATIVE_VITA)
+            // SOTC_VITA_SHOT_SECONDS=<n>: the picture as shown, every n s, to
+            // ux0:data/celosia/shots/shot_<i>.ppm (checking the Vita's picture
+            // without a capture device; reading back stalls the GPU).
+            static const double shotSeconds = std::getenv("SOTC_VITA_SHOT_SECONDS") ? std::atof(std::getenv("SOTC_VITA_SHOT_SECONDS")) : 0.0;
+            if (shotSeconds > 0.0)
+            {
+                static auto nextShot = std::chrono::steady_clock::now() + std::chrono::duration<double>(shotSeconds);
+                static int shotIndex = 0;
+                if (std::chrono::steady_clock::now() >= nextShot)
+                {
+                    nextShot += std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(shotSeconds));
+                    std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4u);
+                    glBindFramebuffer(GL_FRAMEBUFFER, shownFrame[shownIndex].fbo);
+                    glReadPixels(0, 0, static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                    const std::string path = "ux0:data/celosia/shots/shot_" + std::to_string(shotIndex++) + ".ppm";
+                    if (FILE *f = std::fopen(path.c_str(), "wb"))
+                    {
+                        std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+                        std::vector<uint8_t> row(static_cast<size_t>(w) * 3u);
+                        for (uint32_t y = 0; y < h; ++y) // GL rows are bottom up
+                        {
+                            const uint8_t *src = pixels.data() + static_cast<size_t>(h - 1u - y) * w * 4u;
+                            for (uint32_t x = 0; x < w; ++x)
+                                std::memcpy(&row[x * 3u], src + x * 4u, 3u);
+                            std::fwrite(row.data(), 1, row.size(), f);
+                        }
+                        std::fclose(f);
+                    }
+                }
+            }
+#endif
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             hook(shownFrame[shownIndex].texture, w, h);
             return;

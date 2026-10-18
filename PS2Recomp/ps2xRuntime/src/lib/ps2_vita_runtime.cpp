@@ -58,8 +58,11 @@ namespace
         {
             std::freopen("ux0:data/celosia/log.txt", "w", stdout);
             std::freopen("ux0:data/celosia/err.txt", "w", stderr);
-            std::setvbuf(stdout, nullptr, _IOLBF, 0);
-            std::setvbuf(stderr, nullptr, _IONBF, 0);
+            // Fully buffered: the host loop flushes both every 5 s (one card
+            // write per file then, not one per line from every thread).
+            static char outBuffer[64 * 1024], errBuffer[256 * 1024];
+            std::setvbuf(stdout, outBuffer, _IOFBF, sizeof(outBuffer));
+            std::setvbuf(stderr, errBuffer, _IOFBF, sizeof(errBuffer));
             std::fputs("[vita] log started\n", stdout);
             // The Vita has no environment: ux0:data/celosia/env.txt holds
             // KEY=VALUE lines (the PS2X_* switches of a scripted run).
