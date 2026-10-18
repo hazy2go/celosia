@@ -7,6 +7,7 @@
 #include "ps2recomp/types.h"
 
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
@@ -23,6 +24,40 @@ namespace ps2recomp
             inst.opcode = OPCODE_SPECIAL;
             inst.function = SPECIAL_SLL;
             return inst;
+        }
+
+        // Whether a translated instruction can observe ctx->pc: anything that
+        // reaches the runtime (memory access slow paths and their exceptions,
+        // syscalls, calls), touches pc or rdram, or calls something not known
+        // to be a pure register helper. The rest (register and float math)
+        // leaves the pc store out: it was a constant load and a store before
+        // every guest instruction, most of them never read.
+        bool translationObservesPc(const std::string &code)
+        {
+            for (const char *marker : {"runtime", "rdram", "ctx->pc", "Signal", "Exception", "READ", "WRITE", "throw", "return", "goto"})
+                if (code.find(marker) != std::string::npos)
+                    return true;
+            static const char *const kPure[] = {"GPR_", "SET_GPR_", "ADD32", "SUB32", "SLL32", "SRL32", "SRA32", "FPU_", "_mm_", "_MM_",
+                                                "PS2_", "ps2Fpu", "ps2Vu", "std::memcpy", "sizeof", "static_cast", "reinterpret_cast"};
+            for (size_t at = code.find('('); at != std::string::npos; at = code.find('(', at + 1))
+            {
+                size_t start = at;
+                while (start > 0 && (std::isalnum(static_cast<unsigned char>(code[start - 1])) || code[start - 1] == '_' || code[start - 1] == ':'))
+                    --start;
+                if (start == at)
+                    continue; // a plain parenthesis, a cast or a grouping
+                const std::string name = code.substr(start, at - start);
+                if (name == "int32_t" || name == "uint32_t" || name == "int64_t" || name == "uint64_t" || name == "int16_t" || name == "uint16_t" ||
+                    name == "int8_t" || name == "uint8_t" || name == "float" || name == "double")
+                    continue;
+                bool pure = false;
+                for (const char *prefix : kPure)
+                    if (name.rfind(prefix, 0) == 0)
+                        pure = true;
+                if (!pure)
+                    return true;
+            }
+            return false;
         }
     }
 
@@ -200,10 +235,12 @@ namespace ps2recomp
                         continue;
                     }
 
-                    ss << "    ctx->pc = 0x" << std::hex << inst.address << "u;\n"
-                       << std::dec;
                     const MemoryAccessHint memoryHint = resolveMemoryAccessHint(inst, constantRegisters);
-                    ss << "    " << cg.translateInstruction(inst, memoryHint);
+                    const std::string translated = cg.translateInstruction(inst, memoryHint);
+                    if (translationObservesPc(translated))
+                        ss << "    ctx->pc = 0x" << std::hex << inst.address << "u;\n"
+                           << std::dec;
+                    ss << "    " << translated;
                     if (inst.isMmio)
                     {
                         ss << " // MMIO: 0x" << std::hex << inst.mmioAddress << std::dec;

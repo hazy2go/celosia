@@ -287,8 +287,12 @@ inline bool g_ps2LogAllWrites = false;
 PS2_FORCE_INLINE void ps2TraceGuestWrite(uint8_t *rdram, uint32_t guestAddr, uint32_t size, uint64_t valueLo,
                                uint64_t valueHi, const char *op, const R5900Context *ctx)
 {
+#if !defined(PLATFORM_VITA) // a debugging aid: its call inlined at every guest store
     if (__builtin_expect(g_ps2WatchWriteEnabled, 0))
         ps2TraceGuestWriteSlow(rdram, guestAddr, size, valueLo, valueHi, op, ctx);
+#else
+    (void)rdram, (void)guestAddr, (void)size, (void)valueLo, (void)valueHi, (void)op, (void)ctx;
+#endif
 }
 
 inline void ps2TraceGuestRangeWrite(uint8_t *rdram,

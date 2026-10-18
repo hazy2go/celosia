@@ -153,6 +153,22 @@ static PS2_FORCE_INLINE uint32_t ps2_plzcw32(uint32_t x)
 // VU floats have no denormals, infinities or NaNs: denormals read and
 // produce signed zero, Inf/NaN read as signed FLT_MAX and overflow clamps to
 // signed FLT_MAX. Without this, NaN spreads through game math (bone matrices).
+#if defined(__arm__) && !defined(__aarch64__)
+// 32-bit ARM (the Vita): the same results in fewer NEON instructions (6
+// instead of ~10, three times per VU0 multiply). NEON flushes denormals to
+// signed zero itself, as below; min/max take +-Inf to +-max; what NEON keeps
+// as NaN (exponent 255 with a mantissa: integers moved into VF registers,
+// 0xFFFFFFFF masks) becomes its sign | max as below. Bit-exact against the
+// SSE version over 10M patterns (with flush to zero on, as ARMv7 NEON is).
+static PS2_FORCE_INLINE __m128 ps2VuNormalize(__m128 v)
+{
+    const float32x4_t max = vreinterpretq_f32_u32(vdupq_n_u32(0x7F7FFFFFu));
+    const float32x4_t clamped = vminq_f32(vmaxq_f32(v, vnegq_f32(max)), max);
+    const uint32x4_t bits = vreinterpretq_u32_f32(v);
+    const uint32x4_t nanFix = vorrq_u32(vandq_u32(bits, vdupq_n_u32(0x80000000u)), vdupq_n_u32(0x7F7FFFFFu));
+    return vreinterpretq_f32_u32(vbslq_u32(vceqq_f32(v, v), vreinterpretq_u32_f32(clamped), nanFix));
+}
+#else
 static PS2_FORCE_INLINE __m128 ps2VuNormalize(__m128 v)
 {
     const __m128i bits = _mm_castps_si128(v);
@@ -165,6 +181,7 @@ static PS2_FORCE_INLINE __m128 ps2VuNormalize(__m128 v)
     result = _mm_or_si128(_mm_andnot_si128(isMaxExp, result), _mm_and_si128(isMaxExp, clamped));
     return _mm_castsi128_ps(result);
 }
+#endif
 static PS2_FORCE_INLINE float ps2VuNormalizeScalar(float v)
 {
     return _mm_cvtss_f32(ps2VuNormalize(_mm_set1_ps(v)));
@@ -212,6 +229,32 @@ static PS2_FORCE_INLINE uint32_t ps2VuClipFlags(__m128 fsv, __m128 ftv)
 // Fast path: Direct RDRAM access (masked).
 // Slow path: Full runtime->Load/Store
 
+// A shuffle of one vector with itself (every broadcast and swizzle the VU0
+// code makes; the recompiler emits it for _mm_shuffle_ps(v, v, imm)). On
+// 32-bit ARM GCC both sse2neon's _mm_shuffle_ps and a generic permute are
+// table lookups (vtbl): a broadcast is one vdup.
+#if defined(__arm__) && !defined(__aarch64__) && defined(__GNUC__) && !defined(__clang__)
+template <int Imm>
+static PS2_FORCE_INLINE __m128 ps2ShuffleSame(__m128 v)
+{
+    if constexpr (Imm == 0x00)
+        return vdupq_lane_f32(vget_low_f32(v), 0);
+    else if constexpr (Imm == 0x55)
+        return vdupq_lane_f32(vget_low_f32(v), 1);
+    else if constexpr (Imm == 0xAA)
+        return vdupq_lane_f32(vget_high_f32(v), 0);
+    else if constexpr (Imm == 0xFF)
+        return vdupq_lane_f32(vget_high_f32(v), 1);
+    else if constexpr (Imm == 0xE4)
+        return v;
+    else
+        return (__m128)__builtin_shuffle((float32x4_t)v, (uint32x4_t){Imm & 3u, (Imm >> 2) & 3u, (Imm >> 4) & 3u, (Imm >> 6) & 3u});
+}
+#define PS2_SHUFFLE_SAME(v, imm) ps2ShuffleSame<(imm)>(v)
+#else
+#define PS2_SHUFFLE_SAME(v, imm) _mm_shuffle_ps((v), (v), (imm))
+#endif
+
 static PS2_FORCE_INLINE bool Ps2FastRangeIsContiguous(uint32_t offset, uint32_t bytes)
 {
     return offset <= (PS2_RAM_SIZE - bytes);
@@ -222,61 +265,70 @@ static PS2_FORCE_INLINE uint8_t Ps2FastRead8(const uint8_t *rdram, uint32_t addr
     return rdram[addr & PS2_RAM_MASK];
 }
 
+// The access that wraps at the end of RAM, out of line: inlined at every
+// guest load and store it made the hot code larger (the Vita's caches hold
+// little of the game's ~60 MB of code).
+[[gnu::noinline, gnu::cold]] static uint16_t Ps2FastRead16Wrapped(const uint8_t *rdram, uint32_t offset)
+{
+    uint8_t wrapped[sizeof(uint16_t)];
+    for (uint32_t i = 0; i < sizeof(uint16_t); ++i)
+        wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
+    uint16_t value;
+    std::memcpy(&value, wrapped, sizeof(value));
+    return value;
+}
+
 static PS2_FORCE_INLINE uint16_t Ps2FastRead16(const uint8_t *rdram, uint32_t addr)
 {
     const uint32_t offset = addr & PS2_RAM_MASK;
-    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint16_t)))
-    {
-        uint8_t wrapped[sizeof(uint16_t)];
-        for (uint32_t i = 0; i < sizeof(uint16_t); ++i)
-        {
-            wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
-        }
-        uint16_t value;
-        std::memcpy(&value, wrapped, sizeof(value));
-        return value;
-    }
-
+    if (__builtin_expect(!Ps2FastRangeIsContiguous(offset, sizeof(uint16_t)), 0))
+        return Ps2FastRead16Wrapped(rdram, offset);
     uint16_t value;
     std::memcpy(&value, rdram + offset, sizeof(value));
+    return value;
+}
+
+// The access that wraps at the end of RAM, out of line: inlined at every
+// guest load and store it made the hot code larger (the Vita's caches hold
+// little of the game's ~60 MB of code).
+[[gnu::noinline, gnu::cold]] static uint32_t Ps2FastRead32Wrapped(const uint8_t *rdram, uint32_t offset)
+{
+    uint8_t wrapped[sizeof(uint32_t)];
+    for (uint32_t i = 0; i < sizeof(uint32_t); ++i)
+        wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
+    uint32_t value;
+    std::memcpy(&value, wrapped, sizeof(value));
     return value;
 }
 
 static PS2_FORCE_INLINE uint32_t Ps2FastRead32(const uint8_t *rdram, uint32_t addr)
 {
     const uint32_t offset = addr & PS2_RAM_MASK;
-    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint32_t)))
-    {
-        uint8_t wrapped[sizeof(uint32_t)];
-        for (uint32_t i = 0; i < sizeof(uint32_t); ++i)
-        {
-            wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
-        }
-        uint32_t value;
-        std::memcpy(&value, wrapped, sizeof(value));
-        return value;
-    }
-
+    if (__builtin_expect(!Ps2FastRangeIsContiguous(offset, sizeof(uint32_t)), 0))
+        return Ps2FastRead32Wrapped(rdram, offset);
     uint32_t value;
     std::memcpy(&value, rdram + offset, sizeof(value));
+    return value;
+}
+
+// The access that wraps at the end of RAM, out of line: inlined at every
+// guest load and store it made the hot code larger (the Vita's caches hold
+// little of the game's ~60 MB of code).
+[[gnu::noinline, gnu::cold]] static uint64_t Ps2FastRead64Wrapped(const uint8_t *rdram, uint32_t offset)
+{
+    uint8_t wrapped[sizeof(uint64_t)];
+    for (uint32_t i = 0; i < sizeof(uint64_t); ++i)
+        wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
+    uint64_t value;
+    std::memcpy(&value, wrapped, sizeof(value));
     return value;
 }
 
 static PS2_FORCE_INLINE uint64_t Ps2FastRead64(const uint8_t *rdram, uint32_t addr)
 {
     const uint32_t offset = addr & PS2_RAM_MASK;
-    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint64_t)))
-    {
-        uint8_t wrapped[sizeof(uint64_t)];
-        for (uint32_t i = 0; i < sizeof(uint64_t); ++i)
-        {
-            wrapped[i] = rdram[(offset + i) & PS2_RAM_MASK];
-        }
-        uint64_t value;
-        std::memcpy(&value, wrapped, sizeof(value));
-        return value;
-    }
-
+    if (__builtin_expect(!Ps2FastRangeIsContiguous(offset, sizeof(uint64_t)), 0))
+        return Ps2FastRead64Wrapped(rdram, offset);
     uint64_t value;
     std::memcpy(&value, rdram + offset, sizeof(value));
     return value;
@@ -307,51 +359,51 @@ static PS2_FORCE_INLINE void Ps2FastWrite8(uint8_t *rdram, uint32_t addr, uint8_
     rdram[addr & PS2_RAM_MASK] = value;
 }
 
+[[gnu::noinline, gnu::cold]] static void Ps2FastWrite16Wrapped(uint8_t *rdram, uint32_t offset, uint16_t value)
+{
+    uint8_t wrapped[sizeof(uint16_t)];
+    std::memcpy(wrapped, &value, sizeof(value));
+    for (uint32_t i = 0; i < sizeof(uint16_t); ++i)
+        rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
+}
+
 static PS2_FORCE_INLINE void Ps2FastWrite16(uint8_t *rdram, uint32_t addr, uint16_t value)
 {
     const uint32_t offset = addr & PS2_RAM_MASK;
-    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint16_t)))
-    {
-        uint8_t wrapped[sizeof(uint16_t)];
-        std::memcpy(wrapped, &value, sizeof(value));
-        for (uint32_t i = 0; i < sizeof(uint16_t); ++i)
-        {
-            rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
-        }
-        return;
-    }
+    if (__builtin_expect(!Ps2FastRangeIsContiguous(offset, sizeof(uint16_t)), 0))
+        return Ps2FastWrite16Wrapped(rdram, offset, value);
     std::memcpy(rdram + offset, &value, sizeof(value));
+}
+
+[[gnu::noinline, gnu::cold]] static void Ps2FastWrite32Wrapped(uint8_t *rdram, uint32_t offset, uint32_t value)
+{
+    uint8_t wrapped[sizeof(uint32_t)];
+    std::memcpy(wrapped, &value, sizeof(value));
+    for (uint32_t i = 0; i < sizeof(uint32_t); ++i)
+        rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
 }
 
 static PS2_FORCE_INLINE void Ps2FastWrite32(uint8_t *rdram, uint32_t addr, uint32_t value)
 {
     const uint32_t offset = addr & PS2_RAM_MASK;
-    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint32_t)))
-    {
-        uint8_t wrapped[sizeof(uint32_t)];
-        std::memcpy(wrapped, &value, sizeof(value));
-        for (uint32_t i = 0; i < sizeof(uint32_t); ++i)
-        {
-            rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
-        }
-        return;
-    }
+    if (__builtin_expect(!Ps2FastRangeIsContiguous(offset, sizeof(uint32_t)), 0))
+        return Ps2FastWrite32Wrapped(rdram, offset, value);
     std::memcpy(rdram + offset, &value, sizeof(value));
+}
+
+[[gnu::noinline, gnu::cold]] static void Ps2FastWrite64Wrapped(uint8_t *rdram, uint32_t offset, uint64_t value)
+{
+    uint8_t wrapped[sizeof(uint64_t)];
+    std::memcpy(wrapped, &value, sizeof(value));
+    for (uint32_t i = 0; i < sizeof(uint64_t); ++i)
+        rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
 }
 
 static PS2_FORCE_INLINE void Ps2FastWrite64(uint8_t *rdram, uint32_t addr, uint64_t value)
 {
     const uint32_t offset = addr & PS2_RAM_MASK;
-    if (!Ps2FastRangeIsContiguous(offset, sizeof(uint64_t)))
-    {
-        uint8_t wrapped[sizeof(uint64_t)];
-        std::memcpy(wrapped, &value, sizeof(value));
-        for (uint32_t i = 0; i < sizeof(uint64_t); ++i)
-        {
-            rdram[(offset + i) & PS2_RAM_MASK] = wrapped[i];
-        }
-        return;
-    }
+    if (__builtin_expect(!Ps2FastRangeIsContiguous(offset, sizeof(uint64_t)), 0))
+        return Ps2FastWrite64Wrapped(rdram, offset, value);
     std::memcpy(rdram + offset, &value, sizeof(value));
 }
 
@@ -1021,6 +1073,64 @@ static PS2_FORCE_INLINE float ps2VuRsqrtQ(float fs, float ft)
     return ps2VuNormalizeScalar(fs / sqrtf(std::fabs(ft)));
 }
 
+#if defined(__arm__) && !defined(__aarch64__)
+// 32-bit ARM (the Vita): a GPR's low 64 bits read and written as plain
+// integers. Through the SSE emulation every access moved the value between
+// the NEON and the core registers, which stalls a Cortex-A9 each time (most
+// of the recompiled code is GPR traffic). Same results: the upper 64 bits
+// (MMI) stay as they are.
+static PS2_FORCE_INLINE uint32_t Ps2GprLow32(const R5900Context *ctx, int reg)
+{
+    uint32_t v;
+    std::memcpy(&v, &ctx->r[reg], sizeof(v));
+    return v;
+}
+static PS2_FORCE_INLINE uint64_t Ps2GprLow64(const R5900Context *ctx, int reg)
+{
+    uint64_t v;
+    std::memcpy(&v, &ctx->r[reg], sizeof(v));
+    return v;
+}
+static PS2_FORCE_INLINE void Ps2SetGprLow64Scalar(R5900Context *ctx, int reg, uint64_t v)
+{
+    if (reg != 0)
+        std::memcpy(&ctx->r[reg], &v, sizeof(v));
+}
+#define GPR_U32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0U : Ps2GprLow32(ctx_ptr, reg_idx))
+#define GPR_S32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0 : static_cast<int32_t>(Ps2GprLow32(ctx_ptr, reg_idx)))
+#define GPR_U64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0ULL : Ps2GprLow64(ctx_ptr, reg_idx))
+#define GPR_S64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0LL : static_cast<int64_t>(Ps2GprLow64(ctx_ptr, reg_idx)))
+#define GPR_VEC(ctx_ptr, reg_idx) ((reg_idx == 0) ? _mm_setzero_si128() : ctx_ptr->r[reg_idx])
+
+static PS2_FORCE_INLINE void Ps2SetGprLow64(R5900Context *ctx, int reg, __m128i new_low)
+{
+    if (reg != 0)
+    {
+        ctx->r[reg] = _mm_castpd_si128(_mm_move_sd(_mm_castsi128_pd(ctx->r[reg]), _mm_castsi128_pd(new_low)));
+    }
+}
+
+// As the SSE versions: the value is not evaluated for $zero.
+#define SET_GPR_U32(ctx_ptr, reg_idx, val)                                                                                   \
+    do                                                                                                                       \
+    {                                                                                                                        \
+        if ((reg_idx) != 0)                                                                                                  \
+            Ps2SetGprLow64Scalar(ctx_ptr, reg_idx, static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(val)))); \
+    } while (0)
+#define SET_GPR_ZE32(ctx_ptr, reg_idx, val)                                                            \
+    do                                                                                                 \
+    {                                                                                                  \
+        if ((reg_idx) != 0)                                                                            \
+            Ps2SetGprLow64Scalar(ctx_ptr, reg_idx, static_cast<uint64_t>(static_cast<uint32_t>(val))); \
+    } while (0)
+#define SET_GPR_S32(ctx_ptr, reg_idx, val) SET_GPR_U32(ctx_ptr, reg_idx, val)
+#define SET_GPR_U64(ctx_ptr, reg_idx, val)                                      \
+    do                                                                          \
+    {                                                                           \
+        if ((reg_idx) != 0)                                                     \
+            Ps2SetGprLow64Scalar(ctx_ptr, reg_idx, static_cast<uint64_t>(val)); \
+    } while (0)
+#else
 #define GPR_U32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0U : static_cast<uint32_t>(PS2_EXTRACT_EPI32_0(ctx_ptr->r[reg_idx])))
 #define GPR_S32(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0 : PS2_EXTRACT_EPI32_0(ctx_ptr->r[reg_idx]))
 #define GPR_U64(ctx_ptr, reg_idx) ((reg_idx == 0) ? 0ULL : static_cast<uint64_t>(PS2_EXTRACT_EPI64_0(ctx_ptr->r[reg_idx])))
@@ -1076,6 +1186,8 @@ static PS2_FORCE_INLINE void Ps2SetGprLow64(R5900Context *ctx, int reg, __m128i 
             Ps2SetGprLow64(ctx_ptr, reg_idx, _newVal);           \
         }                                                        \
     } while (0)
+
+#endif
 
 #define SET_GPR_S64(ctx_ptr, reg_idx, val) SET_GPR_U64(ctx_ptr, reg_idx, val)
 

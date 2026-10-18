@@ -228,14 +228,40 @@ namespace ps2recomp
 
     CodeGenerator::~CodeGenerator() = default;
 
+    namespace
+    {
+        // _mm_shuffle_ps(v, v, imm) -> PS2_SHUFFLE_SAME(v, imm): a vector with
+        // itself, which the runtime turns into a vdup or a one-operand permute
+        // where the generic shuffle is a table lookup (32-bit ARM).
+        std::string useSameOperandShuffles(std::string code)
+        {
+            static const std::string kShuffle = "_mm_shuffle_ps(";
+            for (size_t at = code.find(kShuffle); at != std::string::npos; at = code.find(kShuffle, at + 1))
+            {
+                const size_t first = at + kShuffle.size();
+                const size_t comma = code.find(", ", first);
+                if (comma == std::string::npos)
+                    break;
+                const std::string operand = code.substr(first, comma - first);
+                if (operand.find_first_of("(),") != std::string::npos)
+                    continue; // only plain operands (ctx->vu0_vf[n])
+                const std::string repeated = operand + ", ";
+                if (code.compare(comma + 2, repeated.size(), repeated) != 0)
+                    continue;
+                code.replace(at, comma + 2 + repeated.size() - at, "PS2_SHUFFLE_SAME(" + operand + ", ");
+            }
+            return code;
+        }
+    }
+
     std::string CodeGenerator::translateInstruction(const Instruction &inst)
     {
-        return InstructionTranslator(*this).translate(inst, {});
+        return useSameOperandShuffles(InstructionTranslator(*this).translate(inst, {}));
     }
 
     std::string CodeGenerator::translateInstruction(const Instruction &inst, const MemoryAccessHint &memoryHint)
     {
-        return InstructionTranslator(*this).translate(inst, memoryHint);
+        return useSameOperandShuffles(InstructionTranslator(*this).translate(inst, memoryHint));
     }
 
     std::string CodeGenerator::translateSpecialInstruction(const Instruction &inst)
