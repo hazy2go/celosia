@@ -1,4 +1,5 @@
 #include "ps2_iop_host.h"
+#include "runtime/ps2_stats.h"
 
 #include "ps2_runtime.h"
 #include "ps2_stubs.h"
@@ -313,6 +314,9 @@ uint64_t PS2IopHostAdapter::openHostFile(std::string_view path)
     {
         return 0u;
     }
+    // Disc files are read in runs of sectors: a large buffer (newlib's
+    // default is 1 KB, a memory card access each on the Vita).
+    std::setvbuf(stream, nullptr, _IOFBF, 64u * 1024u);
 
     std::error_code error;
     const uint64_t size = std::filesystem::file_size(hostPath, error);
@@ -357,6 +361,9 @@ bool PS2IopHostAdapter::readHostFile(uint64_t handle,
         return false;
     }
 
+    ps2_stats::TimeInto timed{ps2_stats::discReadUs};
+    ps2_stats::discReads.fetch_add(1, std::memory_order_relaxed);
+    ps2_stats::discReadBytes.fetch_add(size, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(m_hostFileMutex);
     const auto it = m_hostFiles.find(handle);
     if (it == m_hostFiles.end() || !it->second.stream)

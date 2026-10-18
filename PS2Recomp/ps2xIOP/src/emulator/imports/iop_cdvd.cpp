@@ -651,6 +651,23 @@ namespace ps2x::iop::detail
             return host.readHostFile(node->handle, offset, destination, wanted, bytesRead) && bytesRead == wanted;
         }
 
+        // `count` sectors of one file from `lsn` (all inside it), zero past its end.
+        bool readFileSectors(IsoNode &node, uint32_t lsn, uint32_t count, uint8_t *destination)
+        {
+            if (node.handle == 0u)
+                node.handle = host.openHostFile(node.hostPath.string());
+            if (node.handle == 0u)
+                return false;
+            const size_t total = static_cast<size_t>(count) * kSectorSize;
+            std::memset(destination, 0, total);
+            const uint64_t offset = static_cast<uint64_t>(lsn - node.lsn) * kSectorSize;
+            if (offset >= node.size)
+                return true;
+            const size_t wanted = static_cast<size_t>(std::min<uint64_t>(total, static_cast<uint64_t>(node.size) - offset));
+            size_t bytesRead = 0u;
+            return host.readHostFile(node.handle, offset, destination, wanted, bytesRead) && bytesRead == wanted;
+        }
+
         bool readSectors(uint32_t lsn, uint32_t sectors, uint32_t destination)
         {
             if (sectors == 0u)
@@ -688,13 +705,31 @@ namespace ps2x::iop::detail
             if (!read && buildVirtualIso())
             {
                 read = true;
-                for (uint32_t sector = 0u; sector < sectors; ++sector)
+                for (uint32_t sector = 0u; sector < sectors;)
                 {
-                    if (!readVirtualSector(lsn + sector, bytes.data() + static_cast<size_t>(sector) * kSectorSize))
+                    // The sectors of one file in one host read (a read per
+                    // sector, each a seek and a small read, stalled streaming
+                    // on the Vita's memory card).
+                    const uint32_t at = lsn + sector;
+                    IsoNode *node = metadataSectors.count(at) ? nullptr : fileForSector(at);
+                    uint32_t run = 1u;
+                    if (node)
+                        while (sector + run < sectors && at + run < node->lsn + node->sectors && !metadataSectors.count(at + run))
+                            ++run;
+                    if (run > 1u)
+                    {
+                        if (!readFileSectors(*node, at, run, bytes.data() + static_cast<size_t>(sector) * kSectorSize))
+                        {
+                            read = false;
+                            break;
+                        }
+                    }
+                    else if (!readVirtualSector(at, bytes.data() + static_cast<size_t>(sector) * kSectorSize))
                     {
                         read = false;
                         break;
                     }
+                    sector += run;
                 }
             }
 
