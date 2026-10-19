@@ -33,6 +33,8 @@ namespace native_renderer
     // perFrame: made again every frame (skinned, 2D, particles...): kept only
     // for this frame (one shared buffer per frame on GL).
     void uploadMesh(uint64_t id, const Vertex *vertices, uint32_t count, bool perFrame = false);
+    // A per-frame mesh as its vertices (each once) and the triangles' indices into them.
+    void uploadIndexedMesh(uint64_t id, const Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount);
 
     bool hasTexture(uint64_t id);
     // RGBA8 (alpha 0x80 = opaque, as the PS2's), kept on the GPU under `id`.

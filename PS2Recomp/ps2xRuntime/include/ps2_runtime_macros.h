@@ -854,6 +854,40 @@ static constexpr uint32_t PS2_FCR31_D = 0x00010000u;
 static constexpr uint32_t PS2_FCR31_SI = 0x00000040u;
 static constexpr uint32_t PS2_FCR31_SD = 0x00000020u;
 
+#if defined(__arm__) && !defined(__aarch64__)
+// ARMv7 has no NEON divide or square root: sse2neon makes _mm_div_ss and
+// _mm_sqrt_ss from reciprocal estimates (~16 bits), so game logic diverged
+// from every other host (a cutscene in the opening stalled on the Vita). The
+// VFP's vdiv / vsqrt are exact; rounded to nearest (FPSCR RMode 0) for the
+// span of the instruction, as the other hosts do through MXCSR.
+static PS2_FORCE_INLINE float ps2FpuDivideNearest(float dividend, float divisor)
+{
+    float result;
+    uint32_t fpscr, nearest;
+    __asm__ volatile("vmrs %[fpscr], fpscr\n\t"
+                     "bic %[nearest], %[fpscr], #0xC00000\n\t"
+                     "vmsr fpscr, %[nearest]\n\t"
+                     "vdiv.f32 %[result], %[dividend], %[divisor]\n\t"
+                     "vmsr fpscr, %[fpscr]"
+                     : [result] "=&t"(result), [fpscr] "=&r"(fpscr), [nearest] "=&r"(nearest)
+                     : [dividend] "t"(dividend), [divisor] "t"(divisor));
+    return result;
+}
+
+static PS2_FORCE_INLINE float ps2FpuSqrtNearest(float value)
+{
+    float result;
+    uint32_t fpscr, nearest;
+    __asm__ volatile("vmrs %[fpscr], fpscr\n\t"
+                     "bic %[nearest], %[fpscr], #0xC00000\n\t"
+                     "vmsr fpscr, %[nearest]\n\t"
+                     "vsqrt.f32 %[result], %[value]\n\t"
+                     "vmsr fpscr, %[fpscr]"
+                     : [result] "=&t"(result), [fpscr] "=&r"(fpscr), [nearest] "=&r"(nearest)
+                     : [value] "t"(value));
+    return result;
+}
+#else
 static PS2_FORCE_INLINE float ps2FpuDivideNearest(float dividend, float divisor)
 {
     const uint32_t csr = _mm_getcsr();
@@ -871,6 +905,7 @@ static PS2_FORCE_INLINE float ps2FpuSqrtNearest(float value)
     _mm_setcsr(csr);
     return result;
 }
+#endif
 
 static PS2_FORCE_INLINE float ps2FpuDivide(uint32_t &fcr31, float dividend, float divisor)
 {

@@ -6,6 +6,7 @@
 #include "runtime/native_renderer.h"
 
 #include <functional>
+#include <vector>
 
 namespace native_renderer::detail
 {
@@ -15,6 +16,15 @@ namespace native_renderer::detail
         virtual ~Backend() = default;
         virtual bool hasMesh(uint64_t id) = 0;
         virtual void uploadMesh(uint64_t id, const Vertex *vertices, uint32_t count, bool perFrame) = 0;
+        // A per-frame mesh drawn by index; without its own, as the triangle list.
+        virtual void uploadIndexedMesh(uint64_t id, const Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount)
+        {
+            (void)count;
+            std::vector<Vertex> list(indexCount);
+            for (uint32_t i = 0; i < indexCount; ++i)
+                list[i] = vertices[indices[i]];
+            uploadMesh(id, list.data(), indexCount, true);
+        }
         virtual bool hasTexture(uint64_t id) = 0;
         virtual void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels) = 0;
         virtual void beginFrame() = 0;

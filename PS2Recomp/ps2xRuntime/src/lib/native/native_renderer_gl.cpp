@@ -379,6 +379,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         GLuint buffer = 0;
         uint32_t count = 0;
         bool dynamic = false; // in this frame's arena, from vertex `first`
+        bool indexed = false; // dynamic, drawn by `count` indices from `first` in the frame's index arena
         uint32_t first = 0;
         uint64_t frame = 0;   // the arena it went into (debugging)
         uint64_t used = 0;    // the last frame that drew it (eviction)
@@ -441,7 +442,9 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         std::unordered_map<uint64_t, Texture> textures;
         std::vector<Draw> draws;
         std::vector<native_renderer::Vertex> arena; // this frame's dynamic vertices
+        std::vector<uint32_t> indexArena;            // and indices into them (indexed meshes)
         GLuint arenaBuffers[3] = {};                 // in turn: the GPU may still read the last two
+        GLuint indexBuffers[3] = {};
         int arenaIndex = 0;
         uint64_t arenaFrame = 0;
         // [gl:tex] every 300 frames (the Vita's log; SOTC_GL_TEX_LOG elsewhere):
@@ -857,6 +860,13 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glGenBuffers(1, &arenaBuffers[arenaIndex]);
             glBindBuffer(GL_ARRAY_BUFFER, arenaBuffers[arenaIndex]);
             glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(arena.size() * sizeof(native_renderer::Vertex)), arena.data(), GL_STREAM_DRAW);
+            if (!indexArena.empty())
+            {
+                if (!indexBuffers[arenaIndex])
+                    glGenBuffers(1, &indexBuffers[arenaIndex]);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffers[arenaIndex]);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indexArena.size() * sizeof(uint32_t)), indexArena.data(), GL_STREAM_DRAW);
+            }
         }
         std::stable_sort(draws.begin(), draws.end(), [](const Draw &a, const Draw &b) { return a.state.order < b.state.order; });
         const bool fogOn = fog.enabled && fog.width > 0.0f;
@@ -993,6 +1003,17 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 // attribute offset: past 64 KB it read garbage).
                 const size_t base = 0u;
                 const GLint firstVertex = mesh->second.dynamic ? static_cast<GLint>(mesh->second.first) : 0;
+                const auto drawMesh = [&]
+                {
+                    if (mesh->second.indexed)
+                    {
+                        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffers[arenaIndex]);
+                        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh->second.count), GL_UNSIGNED_INT,
+                                       reinterpret_cast<const void *>(static_cast<uintptr_t>(mesh->second.first) * sizeof(uint32_t)));
+                    }
+                    else
+                        glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(mesh->second.count));
+                };
                 glBindBuffer(GL_ARRAY_BUFFER, mesh->second.dynamic ? arenaBuffers[arenaIndex] : mesh->second.buffer);
                 glEnableVertexAttribArray(0);
                 glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, x)));
@@ -1037,7 +1058,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
 #if !defined(PS2X_NATIVE_VITA)
                     glEnable(GL_DEPTH_CLAMP); // the GS does not cut at the near plane
 #endif
-                    glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(mesh->second.count));
+                    drawMesh();
 #if !defined(PS2X_NATIVE_VITA)
                     glDisable(GL_DEPTH_CLAMP);
 #endif
@@ -1111,7 +1132,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glUniform4fv(uniform(true, "uFogC"), 1, fogC);
                 glUniform4fv(uniform(true, "uFogColour"), 1, fogColour);
                 glUniform4fv(uniform(true, "uDebug"), 1, debug);
-                glDrawArrays(GL_TRIANGLES, firstVertex, static_cast<GLsizei>(mesh->second.count));
+                drawMesh();
             }
             resolveShadows();
             for (GLuint i = 1; i < 4; ++i)
@@ -1422,6 +1443,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             {
                 Mesh &mesh = r->meshes[id];
                 mesh.dynamic = true;
+                mesh.indexed = false;
                 mesh.frame = r->arenaFrame;
                 mesh.first = static_cast<uint32_t>(r->arena.size());
                 mesh.count = count;
@@ -1437,6 +1459,21 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(count * sizeof(native_renderer::Vertex)), vertices, GL_STATIC_DRAW);
             mesh.count = count;
             mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex);
+        }
+        void uploadIndexedMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount) override
+        {
+            Mesh &mesh = r->meshes[id];
+            mesh.dynamic = true;
+            mesh.indexed = true;
+            mesh.frame = r->arenaFrame;
+            const uint32_t base = static_cast<uint32_t>(r->arena.size());
+            mesh.first = static_cast<uint32_t>(r->indexArena.size());
+            mesh.count = indexCount;
+            r->arena.insert(r->arena.end(), vertices, vertices + count);
+            r->indexArena.resize(r->indexArena.size() + indexCount);
+            uint32_t *out = r->indexArena.data() + mesh.first;
+            for (uint32_t i = 0; i < indexCount; ++i)
+                out[i] = base + indices[i];
         }
         bool hasTexture(uint64_t id) override { return r->textures.count(id) != 0; }
         void uploadTexture(uint64_t key, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels) override
@@ -1477,6 +1514,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         {
             r->draws.clear();
             r->arena.clear();
+            r->indexArena.clear();
             ++r->arenaFrame;
             r->blurs.clear();
         }

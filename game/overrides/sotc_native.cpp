@@ -629,7 +629,9 @@ namespace sotc_native
         };
         std::vector<Bind> bind;
         std::vector<native_renderer::Vertex> posed;
-        std::vector<uint32_t> triangles;
+        std::vector<uint32_t> triangles; // without the ones that always pose to a point or a line
+        std::vector<uint8_t> faceNormal; // per triangle: a corner has no normal (it takes the face's)
+        bool indexed = false;            // no triangle takes the face's normal: drawn from `posed` by index
 
         void flatten()
         {
@@ -652,8 +654,28 @@ namespace sotc_native
                     posed.push_back(o);
                 }
                 for (uint32_t i = 2; i < strip.size(); ++i)
+                {
+                    // Two corners with the same bind data pose to the same
+                    // point every frame (the strips' joins): never drawn.
+                    const auto same = [&](uint32_t a, uint32_t b)
+                    {
+                        const Bind &p = bind[base + a], &q = bind[base + b];
+                        if (p.x != q.x || p.y != q.y || p.z != q.z || p.bones != q.bones)
+                            return false;
+                        for (uint32_t k = 0; k < p.bones && k < 3u; ++k)
+                            if (p.weight[k] != q.weight[k] || p.matrix[k] != q.matrix[k])
+                                return false;
+                        return true;
+                    };
+                    if (same(i - 2u, i - 1u) || same(i - 1u, i) || same(i - 2u, i))
+                        continue;
                     triangles.insert(triangles.end(), {base + i - 2u, base + i - 1u, base + i});
+                    // A corner's posed normal is zero exactly when its bind normal is.
+                    const auto none = [&](uint32_t k) { return strip[k].nx == 0.0f && strip[k].ny == 0.0f && strip[k].nz == 0.0f; };
+                    faceNormal.push_back(none(i - 2u) || none(i - 1u) || none(i) ? 1u : 0u);
+                }
             }
+            indexed = std::find(faceNormal.begin(), faceNormal.end(), 1u) == faceNormal.end();
         }
     };
     std::unordered_map<uint64_t, SkinnedPacket> g_skinnedPackets; // by packet
@@ -1766,8 +1788,13 @@ namespace sotc_native
         g_screenBlur(rdram, ctx, runtime);
     }
 
+    // Debugging (timing): SOTC_NM_BISECT bits leave out parts of the native
+    // model work, the picture then wrong: 1 posing, 2 the skinned triangles and
+    // their upload, 4 the surface state (texture, layer, ...), 8 every packet, 16
+    // the palette; 64 skinned meshes as triangle lists (not indexed).
     void modelDispHook(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
     {
+        static const uint32_t g_nmBisect = std::getenv("SOTC_NM_BISECT") ? static_cast<uint32_t>(std::strtoul(std::getenv("SOTC_NM_BISECT"), nullptr, 0)) : 0u;
         syncFrame(rdram);
         const uint32_t instance = GPR_U32(ctx, 4), matrix = GPR_U32(ctx, 5);
         float model[16];
@@ -1829,8 +1856,10 @@ namespace sotc_native
         bool hasPalette;
         {
             ps2_stats::TimeInto timed{ps2_stats::nmPaletteUs};
-            hasPalette = readPalette(instance, palette);
+            hasPalette = !(g_nmBisect & 16u) && readPalette(instance, palette);
         }
+        if (g_nmBisect & 8u)
+            return;
         float projection[16];
         for (int i = 0; i < 16; ++i)
             projection[i] = real(g_cameraContext + 0x40u + i * 4u);
@@ -1839,6 +1868,7 @@ namespace sotc_native
             const uint32_t pk = packets + k * 32u;
             if (word(pk + 4u) != lod)
                 continue;
+            ++ps2_stats::nmPackets;
             const uint32_t part = word(pk + 12u);
             if (part != 0xFFFFFFFFu && table)
             {
@@ -1899,7 +1929,7 @@ namespace sotc_native
                 if (packet.posed.empty())
                     packet.flatten();
                 const float *pal = palette.data();
-                for (size_t i = 0; i < packet.bind.size(); ++i)
+                for (size_t i = 0; i < ((g_nmBisect & 1u) ? 0u : packet.bind.size()); ++i)
                 {
                     const SkinnedPacket::Bind &v = packet.bind[i];
                     native_renderer::Vertex &o = packet.posed[i];
@@ -1916,12 +1946,12 @@ namespace sotc_native
                         position = vmlaq_n_f32(position, p, v.weight[b]);
                         normal = vmlaq_n_f32(normal, n, v.weight[b]);
                     }
-                    o.x = vgetq_lane_f32(position, 0);
-                    o.y = vgetq_lane_f32(position, 1);
-                    o.z = vgetq_lane_f32(position, 2);
-                    o.nx = vgetq_lane_f32(normal, 0);
-                    o.ny = vgetq_lane_f32(normal, 1);
-                    o.nz = vgetq_lane_f32(normal, 2);
+                    // Stored from the NEON registers (a lane moved to an ARM
+                    // register stalls the A9): x y z and a lane over nx, then
+                    // nx ny nz.
+                    vst1q_f32(&o.x, position);
+                    vst1_f32(&o.nx, vget_low_f32(normal));
+                    vst1q_lane_f32(&o.nz, normal, 2);
 #else
                     o.x = o.y = o.z = o.nx = o.ny = o.nz = 0.0f;
                     for (uint32_t b = 0; b < v.bones; ++b)
@@ -1937,40 +1967,63 @@ namespace sotc_native
                     }
 #endif
                 }
-                // The strips' triangles, as triangulate() makes them.
-                vertices.clear();
-                vertices.reserve(packet.triangles.size());
-                for (size_t t = 0; t + 2 < packet.triangles.size(); t += 3)
-                {
-                    const native_renderer::Vertex &a = packet.posed[packet.triangles[t]], &b = packet.posed[packet.triangles[t + 1]],
-                                                  &c = packet.posed[packet.triangles[t + 2]];
-                    const float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
-                    const float vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
-                    const float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-                    const float lengthSquared = nx * nx + ny * ny + nz * nz;
-                    if (!(lengthSquared > 0.0f))
-                        continue; // degenerate (strip joins)
-                    const bool faceNormal = (a.nx == 0.0f && a.ny == 0.0f && a.nz == 0.0f) || (b.nx == 0.0f && b.ny == 0.0f && b.nz == 0.0f) ||
-                                            (c.nx == 0.0f && c.ny == 0.0f && c.nz == 0.0f);
-                    const float len = faceNormal ? std::sqrt(lengthSquared) : 1.0f;
-                    for (const native_renderer::Vertex *v : {&a, &b, &c})
-                    {
-                        vertices.push_back(*v);
-                        native_renderer::Vertex &o = vertices.back();
-                        if (faceNormal && o.nx == 0.0f && o.ny == 0.0f && o.nz == 0.0f)
-                        {
-                            o.nx = nx / len;
-                            o.ny = ny / len;
-                            o.nz = nz / len;
-                        }
-                    }
-                }
                 mesh = (1ull << 63) | g_skinnedDraws++;
                 ps2_stats::skinPosed += packet.bind.size();
                 ++ps2_stats::skinDraws;
-                ps2_stats::skinOutput += vertices.size();
-                native_renderer::uploadMesh(mesh, vertices.data(), static_cast<uint32_t>(vertices.size()), true);
                 transform = projection;
+                if (packet.indexed && !(g_nmBisect & 64u))
+                {
+                    // Each corner once and the triangles' indices into them
+                    // (zero-area ones draw nothing).
+                    ps2_stats::skinOutput += packet.triangles.size();
+                    ++ps2_stats::skinIndexed;
+                    native_renderer::uploadIndexedMesh(mesh, packet.posed.data(), static_cast<uint32_t>(packet.posed.size()), packet.triangles.data(),
+                                                       (g_nmBisect & 2u) ? 0u : static_cast<uint32_t>(packet.triangles.size()));
+                }
+                else
+                {
+                    // The strips' triangles, as triangulate() makes them. The ones
+                    // that come out as a point or a line draw nothing: tested only
+                    // where a corner takes the face's normal.
+                    static std::vector<native_renderer::Vertex> skinned; // only grows: no clearing per draw
+                    if (skinned.size() < packet.triangles.size())
+                        skinned.resize(packet.triangles.size());
+                    native_renderer::Vertex *out = skinned.data();
+                    const uint32_t *corner = packet.triangles.data();
+                    for (size_t t = 0, n = (g_nmBisect & 2u) ? 0u : packet.faceNormal.size(); t < n; ++t, corner += 3)
+                    {
+                        const native_renderer::Vertex &a = packet.posed[corner[0]], &b = packet.posed[corner[1]], &c = packet.posed[corner[2]];
+                        if (!packet.faceNormal[t])
+                        {
+                            out[0] = a;
+                            out[1] = b;
+                            out[2] = c;
+                            out += 3;
+                            continue;
+                        }
+                        const float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+                        const float vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+                        const float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+                        const float lengthSquared = nx * nx + ny * ny + nz * nz;
+                        if (!(lengthSquared > 0.0f))
+                            continue; // degenerate
+                        const float len = std::sqrt(lengthSquared);
+                        for (const native_renderer::Vertex *v : {&a, &b, &c})
+                        {
+                            native_renderer::Vertex &o = *out++;
+                            o = *v;
+                            if (o.nx == 0.0f && o.ny == 0.0f && o.nz == 0.0f)
+                            {
+                                o.nx = nx / len;
+                                o.ny = ny / len;
+                                o.nz = nz / len;
+                            }
+                        }
+                    }
+                    const uint32_t count = static_cast<uint32_t>(out - skinned.data());
+                    ps2_stats::skinOutput += count;
+                    native_renderer::uploadMesh(mesh, skinned.data(), count, true);
+                }
             }
             static const bool logPasses = std::getenv("SOTC_NATIVE_LOG") != nullptr;
             if (logPasses)
@@ -2004,6 +2057,8 @@ namespace sotc_native
             // seen in a mirror, drawn by the game into a buffer of its own with
             // the camera context's +0x520 matrix and sampled by the reflecting
             // surfaces (layers 14/15). Never on the screen; not rendered yet.
+            if (g_nmBisect & 4u)
+                continue;
             const uint32_t layer = surfaceLayer(header, s, fading);
             static const int logLayer = std::getenv("SOTC_LOG_LAYER") ? std::atoi(std::getenv("SOTC_LOG_LAYER")) : -1;
             if (static_cast<int>(layer) == logLayer)
@@ -2036,7 +2091,8 @@ namespace sotc_native
             const bool noMips = !native_renderer::tuning().mipmaps;
             if (!noMips)
                 surfaceLod(header, surface, state);
-            if (std::getenv("SOTC_NATIVE_LOG") && state.maxLod > 0.0f)
+            static const bool logMips = std::getenv("SOTC_NATIVE_LOG") != nullptr;
+            if (logMips && state.maxLod > 0.0f)
             {
                 static std::set<uint64_t> told;
                 if (told.insert((static_cast<uint64_t>(header) << 16) | surface).second && told.size() < 30)
@@ -2096,6 +2152,7 @@ namespace sotc_native
             native_renderer::draw(mesh, transform, state);
             ++g_frameDraws;
             ++g_modelDraws;
+            ++ps2_stats::nmDraws;
             if (twoTextures)
             {
                 // The microcode draws the batch again with the second texture

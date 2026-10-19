@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 #include <cstdlib>
 #include <cstring>
@@ -306,6 +307,10 @@ namespace
         CheckBackend(native_renderer::detail::Backend *shown, native_renderer::detail::Backend *other) : a(shown), b(other) {}
         bool hasMesh(uint64_t id) override { return a->hasMesh(id) && b->hasMesh(id); }
         void uploadMesh(uint64_t id, const native_renderer::Vertex *v, uint32_t n, bool f) override { a->uploadMesh(id, v, n, f), b->uploadMesh(id, v, n, f); }
+        void uploadIndexedMesh(uint64_t id, const native_renderer::Vertex *v, uint32_t n, const uint32_t *i, uint32_t c) override
+        {
+            a->uploadIndexedMesh(id, v, n, i, c), b->uploadIndexedMesh(id, v, n, i, c);
+        }
         bool hasTexture(uint64_t id) override { return a->hasTexture(id) && b->hasTexture(id); }
         void uploadTexture(uint64_t id, uint32_t w, uint32_t h, const uint8_t *p, uint32_t l) override { a->uploadTexture(id, w, h, p, l), b->uploadTexture(id, w, h, p, l); }
         void beginFrame() override { a->beginFrame(), b->beginFrame(); }
@@ -454,6 +459,19 @@ namespace native_renderer
         if (g_uploads.on)
             g_uploads.meshUs += frameClockUs() - start;
     }
+    void uploadIndexedMesh(uint64_t id, const Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount)
+    {
+        if (g_uploads.on)
+        {
+            g_uploads.frameMeshes += 1;
+            g_uploads.frameBytes += static_cast<uint64_t>(count) * sizeof(Vertex) + static_cast<uint64_t>(indexCount) * sizeof(uint32_t);
+        }
+        const uint64_t start = g_uploads.on ? frameClockUs() : 0;
+        if (backend())
+            g_backend->uploadIndexedMesh(id, vertices, count, indices, indexCount);
+        if (g_uploads.on)
+            g_uploads.meshUs += frameClockUs() - start;
+    }
     bool hasTexture(uint64_t id) { return backend() && g_backend->hasTexture(id); }
     void uploadTexture(uint64_t id, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels)
     {
@@ -522,6 +540,11 @@ namespace native_renderer
     }
     void endFrame(uint32_t width, uint32_t height)
     {
+        // Debugging: PS2X_FRAME_SLEEP_MS=<ms> makes every frame that much
+        // longer (a fast host paced like the Vita).
+        static const int sleepMs = std::getenv("PS2X_FRAME_SLEEP_MS") ? std::atoi(std::getenv("PS2X_FRAME_SLEEP_MS")) : 0;
+        if (sleepMs > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
         const uint64_t start = g_uploads.on ? frameClockUs() : 0;
         if (backend())
             g_backend->endFrame(width, height);
@@ -548,6 +571,8 @@ namespace native_renderer
             std::fprintf(stderr, "[uploads] per frame: static meshes %.1f (%.0f KB), per-frame meshes %.1f (%.0f KB), textures %.2f (%.0f KB), draws %.0f\n",
                          u.staticMeshes / 60.0, u.staticBytes / 60.0 / 1024.0, u.frameMeshes / 60.0, u.frameBytes / 60.0 / 1024.0,
                          u.textures / 60.0, u.textureBytes / 60.0 / 1024.0, u.draws / 60.0);
+            std::fprintf(stderr, "[clock] game frames %llu, guest vblanks %llu\n", static_cast<unsigned long long>(ps2_stats::vif1Chains.load()),
+                         static_cast<unsigned long long>(ps2_stats::vblanks.load()));
             // frame = game + render; game is the rest (guest code, display list
             // parsing, skinning, uploads).
             std::fprintf(stderr, "[frametime] ms per frame: frame %.1f render %.1f (worst %.1f) texUpload %.2f meshUpload %.2f game %.1f | worst frame %.1f\n",
@@ -561,8 +586,9 @@ namespace native_renderer
             std::fprintf(stderr, "[nativemodel] ms per frame: palettes %.1f skinning %.1f packet parsing %.1f | skinned vertices posed %.0f, out %.0f\n",
                          ps2_stats::nmPaletteUs.exchange(0) / 60000.0, ps2_stats::nmSkinUs.exchange(0) / 60000.0, ps2_stats::nmParseUs.exchange(0) / 60000.0,
                          ps2_stats::skinPosed / 60.0, ps2_stats::skinOutput / 60.0);
-            std::fprintf(stderr, "[nativemodel] skinned draws %.0f a frame\n", ps2_stats::skinDraws / 60.0);
-            ps2_stats::skinPosed = ps2_stats::skinOutput = ps2_stats::skinDraws = 0;
+            std::fprintf(stderr, "[nativemodel] skinned draws %.0f (%.0f indexed), packets %.0f, draws %.0f a frame\n", ps2_stats::skinDraws / 60.0, ps2_stats::skinIndexed / 60.0, ps2_stats::nmPackets / 60.0,
+                         ps2_stats::nmDraws / 60.0);
+            ps2_stats::skinPosed = ps2_stats::skinOutput = ps2_stats::skinDraws = ps2_stats::skinIndexed = ps2_stats::nmPackets = ps2_stats::nmDraws = 0;
             std::fprintf(stderr, "[framewait] ms per frame: vu1 sync %.1f (%.1f waits) gs priv reads %.1f (%.1f reads) | guest calls %.0f checkpoints %.0f\n",
                          ps2_stats::vu1SyncWaitUs.exchange(0) / 60000.0, ps2_stats::vu1SyncWaits.exchange(0) / 60.0, ps2_stats::gsPrivReadUs.exchange(0) / 60000.0,
                          ps2_stats::gsPrivReads.exchange(0) / 60.0, ps2_stats::guestCalls / 60.0, ps2_stats::guestCheckpoints / 60.0);

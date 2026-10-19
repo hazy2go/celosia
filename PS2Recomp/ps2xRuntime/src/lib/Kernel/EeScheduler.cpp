@@ -2347,8 +2347,17 @@ void EeScheduler::syncCyclesToHostClock()
     if (hostCycles > m_eeCycle)
     {
         uint64_t lag = hostCycles - m_eeCycle;
-        // Never replay more than two frames at once; forget older lag instead.
-        const uint64_t maxLag = 2u * kVBlankPeriodCycles;
+        // Never replay more than one VBlank period at once (PS2X_HOST_SYNC_MAX_LAG
+        // periods); forget older lag instead. A host slower than real time then
+        // runs the game in slow motion, frame steps as on the PS2: with two, a
+        // frame could see three VBlanks, and the opening cinematic held one
+        // shot (the eagle) for ~500 frames at the Vita's speed.
+        static const uint64_t maxLagPeriods = []
+        {
+            const char *env = std::getenv("PS2X_HOST_SYNC_MAX_LAG");
+            return env ? std::max<uint64_t>(1u, std::strtoull(env, nullptr, 10)) : 1u;
+        }();
+        const uint64_t maxLag = maxLagPeriods * kVBlankPeriodCycles;
         if (lag > maxLag)
         {
             m_hostClockBase += std::chrono::microseconds((lag - maxLag) * 1000000ull / kEeClockHz);

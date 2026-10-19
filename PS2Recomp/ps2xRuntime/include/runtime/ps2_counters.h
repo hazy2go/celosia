@@ -28,7 +28,7 @@ namespace ps2_stats
     inline uint64_t compactorCodes = 0, compactorCopied = 0, gifScannedQwords = 0, refReplays = 0;
     inline std::atomic<uint64_t> vu1SyncWaitUs{0}, vu1SyncWaits{0}, gsPrivReadUs{0}, gsPrivReads{0}; // syncVu1 waits; GS privileged register reads
     inline std::atomic<uint64_t> discReadUs{0}, discReads{0}, discReadBytes{0}; // IOP-side disc file reads
-    inline uint64_t skinPosed = 0, skinOutput = 0, skinDraws = 0; // skinned vertices posed / triangle-list vertices out, EE thread
+    inline uint64_t skinPosed = 0, skinOutput = 0, skinDraws = 0, skinIndexed = 0, nmPackets = 0, nmDraws = 0; // (packets of the drawn LOD / draws issued) skinned vertices posed / triangle-list vertices out, EE thread
     inline std::atomic<uint64_t> nmPaletteUs{0}, nmSkinUs{0}, nmParseUs{0}, nmUploadUs{0}; // native model work: bone palettes, CPU skinning, first-time packet parsing
     // Frame split (us): modelDisp's own (recompiled) code, the native model
     // work after it, the display list kicks (iosDmaSendSChainPath1).
