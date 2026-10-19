@@ -11,6 +11,10 @@
 
 namespace ps2recomp
 {
+    // Whether a translated instruction can observe ctx->pc (reach the
+    // runtime, touch pc, call out); others need no pc store before them.
+    bool translationObservesPc(const std::string &code);
+
 	struct JumpTableEntry;
     struct JumpTable;
 	struct Instruction;

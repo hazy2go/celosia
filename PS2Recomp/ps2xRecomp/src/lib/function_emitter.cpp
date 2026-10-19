@@ -28,39 +28,40 @@ namespace ps2recomp
             return inst;
         }
 
-        // Whether a translated instruction can observe ctx->pc: anything that
-        // reaches the runtime (memory access slow paths and their exceptions,
-        // syscalls, calls), touches pc or rdram, or calls something not known
-        // to be a pure register helper. The rest (register and float math)
-        // leaves the pc store out: it was a constant load and a store before
-        // every guest instruction, most of them never read.
-        bool translationObservesPc(const std::string &code)
+    }
+
+    // Whether a translated instruction can observe ctx->pc: anything that
+    // reaches the runtime (calls, syscalls, exceptions), touches pc or rdram,
+    // or calls something not known to be a pure register helper. The rest
+    // (register and float math, guest loads and stores: on the Vita those are
+    // a compare and the access, and nothing their rare slow path does depends
+    // on pc) leaves the pc store out.
+    bool translationObservesPc(const std::string &code)
+    {
+        for (const char *marker : {"runtime", "rdram", "ctx->pc", "Signal", "Exception", "throw", "return", "goto"})
+            if (code.find(marker) != std::string::npos)
+                return true;
+        static const char *const kPure[] = {"GPR_", "SET_GPR_", "ADD32", "SUB32", "SLL32", "SRL32", "SRA32", "FPU_", "_mm_", "_MM_",
+                                            "PS2_", "ps2Fpu", "ps2Vu", "std::memcpy", "sizeof", "static_cast", "reinterpret_cast", "READ", "WRITE"};
+        for (size_t at = code.find('('); at != std::string::npos; at = code.find('(', at + 1))
         {
-            for (const char *marker : {"runtime", "rdram", "ctx->pc", "Signal", "Exception", "READ", "WRITE", "throw", "return", "goto"})
-                if (code.find(marker) != std::string::npos)
-                    return true;
-            static const char *const kPure[] = {"GPR_", "SET_GPR_", "ADD32", "SUB32", "SLL32", "SRL32", "SRA32", "FPU_", "_mm_", "_MM_",
-                                                "PS2_", "ps2Fpu", "ps2Vu", "std::memcpy", "sizeof", "static_cast", "reinterpret_cast"};
-            for (size_t at = code.find('('); at != std::string::npos; at = code.find('(', at + 1))
-            {
-                size_t start = at;
-                while (start > 0 && (std::isalnum(static_cast<unsigned char>(code[start - 1])) || code[start - 1] == '_' || code[start - 1] == ':'))
-                    --start;
-                if (start == at)
-                    continue; // a plain parenthesis, a cast or a grouping
-                const std::string name = code.substr(start, at - start);
-                if (name == "int32_t" || name == "uint32_t" || name == "int64_t" || name == "uint64_t" || name == "int16_t" || name == "uint16_t" ||
-                    name == "int8_t" || name == "uint8_t" || name == "float" || name == "double")
-                    continue;
-                bool pure = false;
-                for (const char *prefix : kPure)
-                    if (name.rfind(prefix, 0) == 0)
-                        pure = true;
-                if (!pure)
-                    return true;
-            }
-            return false;
+            size_t start = at;
+            while (start > 0 && (std::isalnum(static_cast<unsigned char>(code[start - 1])) || code[start - 1] == '_' || code[start - 1] == ':'))
+                --start;
+            if (start == at)
+                continue; // a plain parenthesis, a cast or a grouping
+            const std::string name = code.substr(start, at - start);
+            if (name == "int32_t" || name == "uint32_t" || name == "int64_t" || name == "uint64_t" || name == "int16_t" || name == "uint16_t" ||
+                name == "int8_t" || name == "uint8_t" || name == "float" || name == "double")
+                continue;
+            bool pure = false;
+            for (const char *prefix : kPure)
+                if (name.rfind(prefix, 0) == 0)
+                    pure = true;
+            if (!pure)
+                return true;
         }
+        return false;
     }
 
     FunctionEmitter::FunctionEmitter(CodeGenerator &codeGenerator)
@@ -141,12 +142,9 @@ namespace ps2recomp
            << std::dec;
         ss << "\n";
 
-        bool lastInstructionWasControlFlow = false;
-
         for (size_t i = 0; i < instructions.size(); ++i)
         {
             const Instruction &inst = instructions[i];
-            lastInstructionWasControlFlow = inst.hasDelaySlot;
 
             if (internalTargets.contains(inst.address))
             {
@@ -271,7 +269,9 @@ namespace ps2recomp
         }
 
         // Fallthrough with no terminating branch: publish the next PC so the EE dispatcher does not re-enter this function.
-        if (!instructions.empty() && !lastInstructionWasControlFlow)
+        // Also after a last branch that can fall through (a conditional one):
+        // after an unconditional one this is unreachable.
+        if (!instructions.empty())
         {
             ss << "    ctx->pc = 0x" << std::hex << function.end << "u;\n"
                << std::dec;

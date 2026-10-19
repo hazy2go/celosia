@@ -131,11 +131,17 @@ namespace ps2recomp
             return;
         }
 
-        m_ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, delayPc());
-        m_ss << fmt::format("{}ctx->in_delay_slot = true;\n", indent);
-        m_ss << fmt::format("{}ctx->branch_pc = 0x{:X}u;\n", indent, branchPc());
-
         const std::string code = delaySlotCode();
+        // The delay slot's pc and BD state only where its instruction can
+        // reach the runtime (and so raise an exception or call out).
+        const bool observed = translationObservesPc(code);
+        if (observed)
+        {
+            m_ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, delayPc());
+            m_ss << fmt::format("{}ctx->in_delay_slot = true;\n", indent);
+            m_ss << fmt::format("{}ctx->branch_pc = 0x{:X}u;\n", indent, branchPc());
+        }
+
         std::istringstream lines(code);
         std::string line;
         while (std::getline(lines, line))
@@ -146,7 +152,8 @@ namespace ps2recomp
             }
         }
 
-        m_ss << fmt::format("{}ctx->in_delay_slot = false;\n", indent);
+        if (observed)
+            m_ss << fmt::format("{}ctx->in_delay_slot = false;\n", indent);
     }
 
     void ControlFlowEmitter::emitResumeFromDelaySlotEntry()
@@ -174,9 +181,11 @@ namespace ps2recomp
 
     void ControlFlowEmitter::emitInternalTarget(uint32_t target, uint32_t sourcePc, std::string_view indent)
     {
-        m_ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, target);
+        // pc only for a back edge: the checkpoint returns with it as the
+        // resume point. A forward goto's code sets pc where it is observed.
         if (target <= sourcePc && !isCallLikeEdge())
         {
+            m_ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, target);
             m_ss << fmt::format("{}if (runtime->eeCheckpointDue()) {{\n", indent);
             m_ss << fmt::format("{}    return;\n", indent);
             m_ss << fmt::format("{}}}\n", indent);
@@ -588,14 +597,14 @@ namespace ps2recomp
 
     void ControlFlowEmitter::emitFinalFallthrough()
     {
-        m_ss << fmt::format("    ctx->pc = 0x{:X}u;\n", fallthroughPc());
+        // Nothing reads pc on the way on: the next instruction that can
+        // observe it sets it.
     }
 
     std::string ControlFlowEmitter::emit()
     {
         (void)m_function;
         emitResumeFromDelaySlotEntry();
-        m_ss << fmt::format("    ctx->pc = 0x{:X}u;\n", branchPc());
 
         if (m_branchInst.opcode == OPCODE_J || m_branchInst.opcode == OPCODE_JAL)
         {
