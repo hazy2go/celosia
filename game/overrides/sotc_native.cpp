@@ -303,28 +303,49 @@ namespace sotc_native
     // middle within a second).
     uint64_t sample(uint32_t addr, uint32_t bytes, uint32_t samples)
     {
+        // A direct-mapped table (a slot taken by another key is sampled
+        // again): thousands of lookups a frame in a big area (the shrine).
         struct Known
         {
-            uint64_t id;
-            uint32_t first, last;
-            uint64_t frame;
+            uint64_t key = ~0ull, id = 0, frame = 0;
+            uint32_t first = 0, last = 0;
         };
-        static std::unordered_map<uint64_t, Known> known;
+        constexpr uint32_t kSlots = 16384u;
+        static std::vector<Known> known(kSlots);
         if (bytes < 8u)
             return sampleNow(addr, bytes, samples);
         const uint64_t key = (static_cast<uint64_t>(addr) << 32) ^ (static_cast<uint64_t>(bytes) << 8) ^ samples;
         const uint32_t first = word(addr), last = word(addr + bytes - 4u);
-        auto it = known.find(key);
-        if (it != known.end() && it->second.first == first && it->second.last == last && g_frame - it->second.frame < 64u)
-            return it->second.id;
-        if (known.size() > 65536u)
-            known.clear();
+        Known &slot = known[static_cast<uint32_t>((key * 0x9E3779B97F4A7C15ull) >> 50) & (kSlots - 1u)];
+        if (slot.key == key && slot.first == first && slot.last == last && g_frame - slot.frame < 64u)
+            return slot.id;
         const uint64_t id = sampleNow(addr, bytes, samples);
-        known[key] = Known{id, first, last, g_frame};
+        slot = Known{key, id, g_frame, first, last};
         return id;
     }
 
+    uint64_t decodeTexture(uint32_t header);
+    // A texture's key, once a frame per header (a texture serves many draws:
+    // its key took two content samples and a lookup each time).
     uint64_t texture(uint32_t header)
+    {
+        struct Known
+        {
+            uint32_t header = 0;
+            uint64_t frame = ~0ull, key = 0;
+        };
+        constexpr uint32_t kSlots = 2048u;
+        static std::vector<Known> known(kSlots);
+        Known &slot = known[(header >> 4) & (kSlots - 1u)];
+        if (slot.header == header && slot.frame == g_frame)
+            return slot.key;
+        const uint64_t key = decodeTexture(header);
+        slot = Known{header, g_frame, key};
+        return key;
+    }
+
+    // The texture at an NTO2 header: its key, decoded and uploaded the first time.
+    uint64_t decodeTexture(uint32_t header)
     {
         if (!header || word(header) != 0x324F544Eu) // "NTO2"
             return 0;
@@ -1682,7 +1703,8 @@ namespace sotc_native
         const uint64_t mesh = (1ull << 59) | g_skinnedDraws++;
         native_renderer::uploadMesh(mesh, g_volume.data(), static_cast<uint32_t>(g_volume.size()), true);
         native_renderer::DrawState state;
-        if (std::getenv("SOTC_SHADOW_SHOW")) // debugging: the volumes in red
+        static const bool showShadows = std::getenv("SOTC_SHADOW_SHOW") != nullptr;
+        if (showShadows) // debugging: the volumes in red
         {
             state.debugColour = 0x0000FFu;
             state.order = 15;
@@ -1916,7 +1938,8 @@ namespace sotc_native
     {
         syncFrame(rdram);
         static int n = 0;
-        if (std::getenv("SOTC_NATIVE_LOG") && n++ < 30)
+        static const bool logBlur = std::getenv("SOTC_NATIVE_LOG") != nullptr;
+        if (logBlur && n++ < 30)
             std::fprintf(stderr, "[sblur] frame %llu angle %g scale %g layer %u w %d a1 %d steps %d a3 %d t0 %d\n", (unsigned long long)g_frame, ctx->f[12], ctx->f[13],
                          GPR_U32(ctx, 4), static_cast<int32_t>(GPR_U32(ctx, 5)), static_cast<int32_t>(GPR_U32(ctx, 6)), static_cast<int32_t>(GPR_U32(ctx, 7)),
                          static_cast<int32_t>(GPR_U32(ctx, 8)), static_cast<int32_t>(GPR_U32(ctx, 9)));
@@ -2211,7 +2234,8 @@ namespace sotc_native
                     std::fprintf(stderr, "[mip] header %08x surface %u levels %g L x%g K %g\n", header, surface, state.maxLod + 1.0f, state.lodScale, state.lodK);
             }
             const bool noRow = !native_renderer::tuning().textureScroll;
-            if (!noRow && surfaceRow(header, surface, state.uvOffset) && std::getenv("SOTC_NATIVE_LOG"))
+            static const bool logRows = std::getenv("SOTC_NATIVE_LOG") != nullptr;
+            if (!noRow && surfaceRow(header, surface, state.uvOffset) && logRows)
             {
                 static std::set<uint64_t> told;
                 if (told.insert((static_cast<uint64_t>(header) << 16) | surface).second)
@@ -2318,7 +2342,8 @@ namespace sotc_native
                     refr.refractionSample = true;
                     refr.order = 9;
                     refr.reflectionTint[3] = refractAlpha;
-                    if (std::getenv("SOTC_REFRACT_SHOW")) // debugging: where it lands, in red
+                    static const bool showRefraction = std::getenv("SOTC_REFRACT_SHOW") != nullptr;
+                    if (showRefraction) // debugging: where it lands, in red
                     {
                         refr.reflectionTint[0] = 4.0f;
                         refr.reflectionTint[1] = refr.reflectionTint[2] = 0.0f;
