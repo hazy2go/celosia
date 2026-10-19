@@ -28,9 +28,14 @@
 #include "runtime/gs/ps2_gs_psmct32.h"
 #include "runtime/gs/ps2_gs_psmt4.h"
 #include "runtime/gs/ps2_gs_psmt8.h"
+#include "runtime/ps2_counters.h"
 #include "runtime/ps2_stats.h"
 
 #include <algorithm>
+#include <chrono>
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 #include <map>
 #include <cmath>
 #include <cstdio>
@@ -232,24 +237,34 @@ namespace sotc_native
                 o.b = v.b;
                 o.a = v.a;
             }
+            // Reserved once per strip (no reallocation), and the sqrt only
+            // for a face normal: this runs per frame for every skinned draw.
+            // (resize() would zero every vertex first: slower on the Vita.)
+            if (placed.size() < 3)
+                continue;
+            out.reserve(out.size() + (placed.size() - 2) * 3);
             for (size_t i = 2; i < placed.size(); ++i)
             {
-                native_renderer::Vertex t[3] = {placed[i - 2], placed[i - 1], placed[i]};
-                const float ux = t[1].x - t[0].x, uy = t[1].y - t[0].y, uz = t[1].z - t[0].z;
-                const float vx = t[2].x - t[0].x, vy = t[2].y - t[0].y, vz = t[2].z - t[0].z;
-                float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-                const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
-                if (!(len > 0.0f))
+                const native_renderer::Vertex &a = placed[i - 2], &b = placed[i - 1], &c = placed[i];
+                const float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+                const float vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+                const float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+                const float lengthSquared = nx * nx + ny * ny + nz * nz;
+                if (!(lengthSquared > 0.0f))
                     continue; // degenerate (strip joins)
-                for (native_renderer::Vertex &v : t)
+                const bool faceNormal = (a.nx == 0.0f && a.ny == 0.0f && a.nz == 0.0f) || (b.nx == 0.0f && b.ny == 0.0f && b.nz == 0.0f) ||
+                                        (c.nx == 0.0f && c.ny == 0.0f && c.nz == 0.0f);
+                const float len = faceNormal ? std::sqrt(lengthSquared) : 1.0f;
+                for (const native_renderer::Vertex *v : {&a, &b, &c})
                 {
-                    if (v.nx == 0.0f && v.ny == 0.0f && v.nz == 0.0f)
+                    out.push_back(*v);
+                    native_renderer::Vertex &o = out.back();
+                    if (faceNormal && o.nx == 0.0f && o.ny == 0.0f && o.nz == 0.0f)
                     {
-                        v.nx = nx / len;
-                        v.ny = ny / len;
-                        v.nz = nz / len;
+                        o.nx = nx / len;
+                        o.ny = ny / len;
+                        o.nz = nz / len;
                     }
-                    out.push_back(v);
                 }
             }
         }
@@ -266,13 +281,42 @@ namespace sotc_native
     // An NTO2 texture (level 0) as RGBA8, on the GPU once under its header address.
     // The game streams data in and reuses memory when the area changes: what
     // is cached under an address is also keyed by a sample of its contents.
-    uint64_t sample(uint32_t addr, uint32_t bytes, uint32_t samples)
+    uint64_t sampleNow(uint32_t addr, uint32_t bytes, uint32_t samples)
     {
         uint64_t h = 0xcbf29ce484222325ull ^ addr;
         const uint32_t step = std::max<uint32_t>((bytes / samples) & ~3u, 4u);
         for (uint32_t off = 0; off + 4u <= bytes; off += step)
             h = (h ^ word(addr + off)) * 0x100000001b3ull;
         return h;
+    }
+
+    // A content id for guest data (a packet, a texture) without reading it
+    // all again every frame: 32-80 words spread over MBs of RAM per draw
+    // were cache misses on the Vita. Remembered per (address, size), kept
+    // while its first and last words are unchanged, sampled again in full
+    // every 64 frames (another area loaded over it changes the ends, or the
+    // middle within a second).
+    uint64_t sample(uint32_t addr, uint32_t bytes, uint32_t samples)
+    {
+        struct Known
+        {
+            uint64_t id;
+            uint32_t first, last;
+            uint64_t frame;
+        };
+        static std::unordered_map<uint64_t, Known> known;
+        if (bytes < 8u)
+            return sampleNow(addr, bytes, samples);
+        const uint64_t key = (static_cast<uint64_t>(addr) << 32) ^ (static_cast<uint64_t>(bytes) << 8) ^ samples;
+        const uint32_t first = word(addr), last = word(addr + bytes - 4u);
+        auto it = known.find(key);
+        if (it != known.end() && it->second.first == first && it->second.last == last && g_frame - it->second.frame < 64u)
+            return it->second.id;
+        if (known.size() > 65536u)
+            known.clear();
+        const uint64_t id = sampleNow(addr, bytes, samples);
+        known[key] = Known{id, first, last, g_frame};
+        return id;
     }
 
     uint64_t texture(uint32_t header)
@@ -572,6 +616,45 @@ namespace sotc_native
     {
         std::vector<Strip> strips; // bind pose
         uint64_t used = 0;         // the last frame (g_frame) that drew it
+        // Flattened at the first draw, so a frame only poses: every strip's
+        // vertices in one array (the bind pose, and the output with its
+        // texture coordinates and colour already in place) and the strips'
+        // triangles as index triples.
+        struct Bind
+        {
+            float x, y, z, nx, ny, nz;
+            float weight[3];
+            uint16_t matrix[3]; // the bone's matrix: float offset in the palette
+            uint32_t bones;
+        };
+        std::vector<Bind> bind;
+        std::vector<native_renderer::Vertex> posed;
+        std::vector<uint32_t> triangles;
+
+        void flatten()
+        {
+            for (const Strip &strip : strips)
+            {
+                const uint32_t base = static_cast<uint32_t>(posed.size());
+                for (const BatchVertex &v : strip)
+                {
+                    Bind b{v.x, v.y, v.z, v.nx, v.ny, v.nz, {v.weight[0], v.weight[1], v.weight[2]}, {}, v.bones};
+                    for (uint32_t k = 0; k < 3u; ++k)
+                        b.matrix[k] = static_cast<uint16_t>((v.bone[k] * 4u % 1024u) * 4u);
+                    bind.push_back(b);
+                    native_renderer::Vertex o{};
+                    o.u = v.u;
+                    o.v = v.v;
+                    o.r = v.r;
+                    o.g = v.g;
+                    o.b = v.b;
+                    o.a = v.a;
+                    posed.push_back(o);
+                }
+                for (uint32_t i = 2; i < strip.size(); ++i)
+                    triangles.insert(triangles.end(), {base + i - 2u, base + i - 1u, base + i});
+            }
+        }
     };
     std::unordered_map<uint64_t, SkinnedPacket> g_skinnedPackets; // by packet
     std::unordered_set<uint64_t> g_litPackets;                        // packets with normals
@@ -1743,7 +1826,11 @@ namespace sotc_native
         static std::vector<native_renderer::Vertex> vertices;
         static std::vector<Strip> strips;
         static std::vector<float> palette;
-        const bool hasPalette = readPalette(instance, palette);
+        bool hasPalette;
+        {
+            ps2_stats::TimeInto timed{ps2_stats::nmPaletteUs};
+            hasPalette = readPalette(instance, palette);
+        }
         float projection[16];
         for (int i = 0; i < 16; ++i)
             projection[i] = real(g_cameraContext + 0x40u + i * 4u);
@@ -1769,6 +1856,7 @@ namespace sotc_native
             if (skinnedPacket == g_skinnedPackets.end() &&
                 (!native_renderer::hasMesh(id) || (twoPasses && !native_renderer::hasMesh(id ^ (1ull << 61)))))
             {
+                ps2_stats::TimeInto timedParse{ps2_stats::nmParseUs};
                 strips.clear();
                 readBatches(data, size, strips);
                 if (skinned(strips) && lit(strips))
@@ -1807,13 +1895,38 @@ namespace sotc_native
                 if (!hasPalette)
                     continue;
                 // Posed on the CPU (camera space), one mesh per draw this frame.
-                vertices.clear();
-                triangulate(skinnedPacket->second.strips, [](const BatchVertex &v, native_renderer::Vertex &o)
+                SkinnedPacket &packet = skinnedPacket->second;
+                if (packet.posed.empty())
+                    packet.flatten();
+                const float *pal = palette.data();
+                for (size_t i = 0; i < packet.bind.size(); ++i)
                 {
+                    const SkinnedPacket::Bind &v = packet.bind[i];
+                    native_renderer::Vertex &o = packet.posed[i];
+#if defined(__ARM_NEON)
+                    // Each bone's matrix columns times (x, y, z, 1): 4 vector
+                    // multiply-adds for the position, 3 for the normal.
+                    float32x4_t position = vdupq_n_f32(0.0f), normal = vdupq_n_f32(0.0f);
+                    for (uint32_t b = 0; b < v.bones; ++b)
+                    {
+                        const float *m = pal + v.matrix[b];
+                        const float32x4_t c0 = vld1q_f32(m), c1 = vld1q_f32(m + 4), c2 = vld1q_f32(m + 8), c3 = vld1q_f32(m + 12);
+                        const float32x4_t p = vmlaq_n_f32(vmlaq_n_f32(vmlaq_n_f32(c3, c0, v.x), c1, v.y), c2, v.z);
+                        const float32x4_t n = vmlaq_n_f32(vmlaq_n_f32(vmulq_n_f32(c0, v.nx), c1, v.ny), c2, v.nz);
+                        position = vmlaq_n_f32(position, p, v.weight[b]);
+                        normal = vmlaq_n_f32(normal, n, v.weight[b]);
+                    }
+                    o.x = vgetq_lane_f32(position, 0);
+                    o.y = vgetq_lane_f32(position, 1);
+                    o.z = vgetq_lane_f32(position, 2);
+                    o.nx = vgetq_lane_f32(normal, 0);
+                    o.ny = vgetq_lane_f32(normal, 1);
+                    o.nz = vgetq_lane_f32(normal, 2);
+#else
                     o.x = o.y = o.z = o.nx = o.ny = o.nz = 0.0f;
                     for (uint32_t b = 0; b < v.bones; ++b)
                     {
-                        const float *m = &palette[(v.bone[b] * 4u % 1024u) * 4u];
+                        const float *m = pal + v.matrix[b];
                         const float w = v.weight[b];
                         o.x += w * (m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12]);
                         o.y += w * (m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13]);
@@ -1822,8 +1935,40 @@ namespace sotc_native
                         o.ny += w * (m[1] * v.nx + m[5] * v.ny + m[9] * v.nz);
                         o.nz += w * (m[2] * v.nx + m[6] * v.ny + m[10] * v.nz);
                     }
-                }, vertices);
+#endif
+                }
+                // The strips' triangles, as triangulate() makes them.
+                vertices.clear();
+                vertices.reserve(packet.triangles.size());
+                for (size_t t = 0; t + 2 < packet.triangles.size(); t += 3)
+                {
+                    const native_renderer::Vertex &a = packet.posed[packet.triangles[t]], &b = packet.posed[packet.triangles[t + 1]],
+                                                  &c = packet.posed[packet.triangles[t + 2]];
+                    const float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+                    const float vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+                    const float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+                    const float lengthSquared = nx * nx + ny * ny + nz * nz;
+                    if (!(lengthSquared > 0.0f))
+                        continue; // degenerate (strip joins)
+                    const bool faceNormal = (a.nx == 0.0f && a.ny == 0.0f && a.nz == 0.0f) || (b.nx == 0.0f && b.ny == 0.0f && b.nz == 0.0f) ||
+                                            (c.nx == 0.0f && c.ny == 0.0f && c.nz == 0.0f);
+                    const float len = faceNormal ? std::sqrt(lengthSquared) : 1.0f;
+                    for (const native_renderer::Vertex *v : {&a, &b, &c})
+                    {
+                        vertices.push_back(*v);
+                        native_renderer::Vertex &o = vertices.back();
+                        if (faceNormal && o.nx == 0.0f && o.ny == 0.0f && o.nz == 0.0f)
+                        {
+                            o.nx = nx / len;
+                            o.ny = ny / len;
+                            o.nz = nz / len;
+                        }
+                    }
+                }
                 mesh = (1ull << 63) | g_skinnedDraws++;
+                ps2_stats::skinPosed += packet.bind.size();
+                ++ps2_stats::skinDraws;
+                ps2_stats::skinOutput += vertices.size();
                 native_renderer::uploadMesh(mesh, vertices.data(), static_cast<uint32_t>(vertices.size()), true);
                 transform = projection;
             }

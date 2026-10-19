@@ -9,6 +9,7 @@
 
 #include <psp2/kernel/processmgr.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 
@@ -164,6 +165,9 @@ void runVitaMicrobench()
         { for (uint32_t i = 0; i < kOps; ++i) { ctx->pc = 0x100000u + i; sink(i); } });
     run("indirect call (dispatch)", [&]
         { for (uint32_t i = 0; i < kOps; ++i) indirect(ctx); sink(ctx->pc); });
+    run("steady_clock::now()", [&]
+        { uint64_t s = 0; for (uint32_t i = 0; i < kOps / 64u; ++i) s += static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()); sink(s); });
+    results[count - 1].nsPerOp *= 64.0; // a 64th of the loop
     run("dmb (memory barrier)", [&]
         { for (uint32_t i = 0; i < kOps; ++i) __sync_synchronize(); sink(0); });
     run("float->int->float (vmov round trip)", [&]
