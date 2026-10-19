@@ -1681,6 +1681,16 @@ void PS2Runtime::reportMissingFunction(uint8_t *rdram,
 
 namespace
 {
+    // PS2X_DISPATCHER_PROFILE, asked on hot paths: a plain flag read lazily
+    // (a function-local static's guard is a barrier on ARM at every check).
+    int g_dispatcherProfileState = -1; // unknown, off, on
+    bool dispatcherProfileOn()
+    {
+        if (g_dispatcherProfileState < 0)
+            g_dispatcherProfileState = std::getenv("PS2X_DISPATCHER_PROFILE") ? 1 : 0;
+        return g_dispatcherProfileState == 1;
+    }
+
     // Guest jumps dispatched (see dispatchGuestBranch); guest code runs on
     // the EE scheduler's executor thread only (not thread_local: emutls on
     // the Vita).
@@ -1775,6 +1785,29 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         ctx->pc = fallthroughPc;
     }
 
+    // PS2X_DISPATCHER_PROFILE: calls that did not come back to their return
+    // address (the caller's C++ frame then returns to the dispatcher, which
+    // re-enters it at the return address through its resume switch).
+    if (ctx->pc != fallthroughPc && g_dispatcherProfileState != 0 && dispatcherProfileOn())
+    {
+        static std::map<std::tuple<uint32_t, uint32_t, uint32_t>, uint64_t> broken; // target, pc after, expected
+        static auto last = std::chrono::steady_clock::now();
+        ++broken[{targetPc, ctx->pc, fallthroughPc}];
+        if (std::chrono::steady_clock::now() - last >= std::chrono::seconds(5))
+        {
+            last = std::chrono::steady_clock::now();
+            std::vector<std::pair<uint64_t, std::tuple<uint32_t, uint32_t, uint32_t>>> top;
+            for (const auto &[k, n] : broken)
+                top.push_back({n, k});
+            std::sort(top.rbegin(), top.rend());
+            std::fprintf(stderr, "[calls] not returning (target -> pc, expected):");
+            for (size_t i = 0; i < top.size() && i < 12; ++i)
+                std::fprintf(stderr, " %08x->%08x(%08x)=%llu", std::get<0>(top[i].second), std::get<1>(top[i].second), std::get<2>(top[i].second),
+                             static_cast<unsigned long long>(top[i].first / 5));
+            std::fprintf(stderr, "\n");
+            broken.clear();
+        }
+    }
     return ctx->pc == fallthroughPc;
 }
 
@@ -2417,6 +2450,7 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
 
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
+    ps2_stats::noteSlowAccess(vaddr);
     try
     {
         return m_memory.read8(vaddr);
@@ -2430,6 +2464,7 @@ uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 
 uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
+    ps2_stats::noteSlowAccess(vaddr);
     try
     {
         return m_memory.read16(vaddr);
@@ -2443,6 +2478,7 @@ uint16_t PS2Runtime::Load16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 
 uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
+    ps2_stats::noteSlowAccess(vaddr);
     try
     {
         return m_memory.read32(vaddr);
@@ -2456,6 +2492,7 @@ uint32_t PS2Runtime::Load32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 
 uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
+    ps2_stats::noteSlowAccess(vaddr);
     try
     {
         return m_memory.read64(vaddr);
@@ -2469,6 +2506,7 @@ uint64_t PS2Runtime::Load64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 
 __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
+    ps2_stats::noteSlowAccess(vaddr);
     try
     {
         return m_memory.read128(vaddr);
@@ -2482,6 +2520,7 @@ __m128i PS2Runtime::Load128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 
 void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8_t value)
 {
+    ps2_stats::noteSlowAccess(vaddr);
     ps2TraceGuestWrite(rdram, vaddr, 1u, value, 0u, "WRITE8", ctx);
     try
     {
@@ -2495,6 +2534,7 @@ void PS2Runtime::Store8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint8
 
 void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint16_t value)
 {
+    ps2_stats::noteSlowAccess(vaddr);
     ps2TraceGuestWrite(rdram, vaddr, 2u, value, 0u, "WRITE16", ctx);
     try
     {
@@ -2508,6 +2548,7 @@ void PS2Runtime::Store16(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 
 void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint32_t value)
 {
+    ps2_stats::noteSlowAccess(vaddr);
     ps2TraceGuestWrite(rdram, vaddr, 4u, value, 0u, "WRITE32", ctx);
     try
     {
@@ -2522,6 +2563,7 @@ void PS2Runtime::Store32(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 
 void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint64_t value)
 {
+    ps2_stats::noteSlowAccess(vaddr);
     ps2TraceGuestWrite(rdram, vaddr, 8u, value, 0u, "WRITE64", ctx);
     try
     {
@@ -2535,6 +2577,7 @@ void PS2Runtime::Store64(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, uint
 
 void PS2Runtime::Store128(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr, __m128i value)
 {
+    ps2_stats::noteSlowAccess(vaddr);
     alignas(16) uint64_t _parts[2];
     _mm_storeu_si128(reinterpret_cast<__m128i *>(_parts), value);
     ps2TraceGuestWrite(rdram, vaddr, 16u, _parts[0], _parts[1], "WRITE128", ctx);

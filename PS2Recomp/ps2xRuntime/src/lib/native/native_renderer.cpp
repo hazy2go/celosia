@@ -560,6 +560,19 @@ namespace native_renderer
                          ps2_stats::vu1SyncWaitUs.exchange(0) / 60000.0, ps2_stats::vu1SyncWaits.exchange(0) / 60.0, ps2_stats::gsPrivReadUs.exchange(0) / 60000.0,
                          ps2_stats::gsPrivReads.exchange(0) / 60.0, ps2_stats::guestCalls / 60.0, ps2_stats::guestCheckpoints / 60.0);
             ps2_stats::guestCalls = ps2_stats::guestCheckpoints = 0;
+            std::fprintf(stderr, "[memslow] per frame: slow accesses %.0f (scratchpad %.0f), DMA chain walks %.1f ms\n", ps2_stats::slowAccesses / 60.0,
+                         ps2_stats::slowScratchpad / 60.0, ps2_stats::vifChainUs.exchange(0) / 60000.0);
+            ps2_stats::slowAccesses = ps2_stats::slowScratchpad = 0;
+            std::fprintf(stderr, "[chains] per frame: walks %.1f tags %.0f payload %.0f KB\n", ps2_stats::chainWalks / 60.0, ps2_stats::chainTags / 60.0,
+                         ps2_stats::chainBytes / 60.0 / 1024.0);
+            ps2_stats::chainWalks = ps2_stats::chainTags = ps2_stats::chainBytes = 0;
+            std::fprintf(stderr, "[chains] per frame: VIF codes %.0f, copied %.0f KB, GIF qwords scanned %.0f\n", ps2_stats::compactorCodes / 60.0,
+                         ps2_stats::compactorCopied / 60.0 / 1024.0, ps2_stats::gifScannedQwords / 60.0);
+            ps2_stats::compactorCodes = ps2_stats::compactorCopied = ps2_stats::gifScannedQwords = 0;
+            std::fprintf(stderr, "[dispatcher] per frame: loop turns %.0f, unwinds pending %.1f deadline %.1f slice %.1f\n",
+                         ps2_stats::dispatcherIterations / 60.0, ps2_stats::unwindsPending / 60.0, ps2_stats::unwindsDeadline / 60.0,
+                         ps2_stats::unwindsSlice / 60.0);
+            ps2_stats::dispatcherIterations = ps2_stats::unwindsPending = ps2_stats::unwindsDeadline = ps2_stats::unwindsSlice = 0;
             u.staticMeshes = u.staticBytes = u.frameMeshes = u.frameBytes = u.textures = u.textureBytes = u.draws = 0;
             u.frameUs = u.renderUs = u.textureUs = u.meshUs = u.worstFrameUs = u.worstRenderUs = 0;
         }

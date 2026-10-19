@@ -352,6 +352,7 @@ void Vif1Compactor::feed(const uint8_t *data, uint32_t bytes)
         if (m_copy != 0u)
         {
             const uint32_t n = std::min(m_copy, bytes - pos);
+            ps2_stats::compactorCopied += n;
             append(data + pos, n);
             m_copy -= n;
             pos += n;
@@ -375,9 +376,14 @@ void Vif1Compactor::feed(const uint8_t *data, uint32_t bytes)
         }
         if (pos + 4u > bytes)
             break;
+        // The chain is a few MB the game wrote earlier in the frame, read
+        // forward: without a prefetch nearly every VIFcode was a cache miss
+        // (~160 cycles each on the Vita, ~90k codes a frame).
+        __builtin_prefetch(data + pos + 256u);
         uint32_t cmd;
         std::memcpy(&cmd, data + pos, 4);
         pos += 4u;
+        ++ps2_stats::compactorCodes;
         const uint8_t opcode = (cmd >> 24) & 0x7Fu;
         const uint16_t imm = cmd & 0xFFFFu;
         const uint8_t num = (cmd >> 16) & 0xFFu;

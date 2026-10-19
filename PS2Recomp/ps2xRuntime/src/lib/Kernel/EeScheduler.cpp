@@ -206,6 +206,7 @@ void EeScheduler::run()
             }
         }
 
+        ++ps2_stats::dispatcherIterations;
         GuestThread *running = currentThread();
         assert(running != nullptr);
         if (running->resumeCompletion)
@@ -301,6 +302,31 @@ void EeScheduler::run()
             continue;
         }
         PS2Runtime::RecompiledFunction function = m_runtime.lookupFunction(context.pc);
+        // PS2X_DISPATCHER_PROFILE=1: the guest PCs the dispatcher loop runs
+        // most (each turn is a lookup and a re-entry through the function's
+        // resume switch), with how the last one came back, every 5 s.
+        static int dispatcherProfile = -1; // read once; no guarded static on this path (a barrier on ARM)
+        if (dispatcherProfile < 0)
+            dispatcherProfile = std::getenv("PS2X_DISPATCHER_PROFILE") ? 1 : 0;
+        if (dispatcherProfile)
+        {
+            static std::unordered_map<uint32_t, uint64_t> turns;
+            static auto last = std::chrono::steady_clock::now();
+            ++turns[context.pc];
+            if (std::chrono::steady_clock::now() - last >= std::chrono::seconds(5))
+            {
+                last = std::chrono::steady_clock::now();
+                std::vector<std::pair<uint64_t, uint32_t>> top;
+                for (const auto &[pc, n] : turns)
+                    top.push_back({n, pc});
+                std::sort(top.rbegin(), top.rend());
+                std::fprintf(stderr, "[dispatcher] top re-entries:");
+                for (size_t i = 0; i < top.size() && i < 16; ++i)
+                    std::fprintf(stderr, " %08x=%llu", top[i].second, static_cast<unsigned long long>(top[i].first / 5));
+                std::fprintf(stderr, " (distinct %zu)\n", top.size());
+                turns.clear();
+            }
+        }
 
         if (checkpointDue(kGuestDispatchCycles))
         {
@@ -311,7 +337,9 @@ void EeScheduler::run()
         // interrupt handler, but each guest context carries its own copy.
         // Keep them coherent by moving the live VU0 state into whichever
         // context runs next.
-        static const bool sharedVu0 = std::getenv("PS2X_VU0_PER_THREAD") == nullptr;
+        static int sharedVu0 = -1; // read once; no guarded static on this path (a barrier on ARM)
+        if (sharedVu0 < 0)
+            sharedVu0 = std::getenv("PS2X_VU0_PER_THREAD") ? 0 : 1;
         if (sharedVu0)
         {
             const Vu0OwnerKey key{m_currentThreadId, running->invocations.size(),
@@ -433,6 +461,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
         m_stopRequested.load(std::memory_order_relaxed))
     {
         std::atomic_thread_fence(std::memory_order_acquire);
+        ++ps2_stats::unwindsPending;
         m_unwinding = true;
         return true;
     }
@@ -441,6 +470,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
     {
         std::atomic_thread_fence(std::memory_order_acquire);
+        ++ps2_stats::unwindsDeadline;
         m_checkpointPending.store(true, std::memory_order_release);
         m_unwinding = true;
         return true;
@@ -456,6 +486,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
     {
         m_rescheduleRequested = true;
         m_timeSliceExpired = true;
+        ++ps2_stats::unwindsSlice;
         m_unwinding = true;
         return true;
     }

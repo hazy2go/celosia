@@ -4,6 +4,8 @@
 #include <cstring>
 #include <functional>
 
+#include "runtime/ps2_stats.h"
+
 // GIF data when the GS rasterizes nothing (GS::skipRaster): of a packet only
 // the event registers matter (SIGNAL, FINISH, LABEL, written with A+D), the
 // game waits on them; primitives, images and the rest are stepped over
@@ -30,8 +32,10 @@ public:
         }
         while (pos + 16u <= bytes)
         {
-            // Data of an IMAGE or REGLIST block: skipped as a whole.
-            if (m_remaining != 0u && m_format != 0u)
+            // Data of an IMAGE or REGLIST block, or of a PACKED one with no
+            // A+D register (nothing in it can write an event): skipped as a
+            // whole.
+            if (m_remaining != 0u && (m_format != 0u || !m_hasAd))
             {
                 const uint32_t n = std::min<uint32_t>(m_remaining, (bytes - pos) / 16u);
                 m_remaining -= n;
@@ -39,6 +43,7 @@ public:
                 continue;
             }
             qword(data + pos);
+            ++ps2_stats::gifScannedQwords;
             pos += 16u;
         }
         if (pos < bytes)
@@ -63,14 +68,20 @@ private:
                 m_nreg = 16u;
             m_regs = hi;
             m_index = 0;
+            m_hasAd = false;
+            for (uint32_t i = 0; i < m_nreg; ++i)
+                m_hasAd |= ((m_regs >> (i * 4u)) & 0xFu) == 0xEu;
             m_remaining = m_format == 0u ? nloop * m_nreg : m_format == 1u ? (nloop * m_nreg + 1u) / 2u : nloop;
             return;
         }
         --m_remaining;
         if (m_format != 0u)
             return;
-        const uint32_t reg = static_cast<uint32_t>(m_regs >> ((m_index % m_nreg) * 4u)) & 0xFu;
-        ++m_index;
+        // The register of this qword, wrapped without a division (the Vita's
+        // Cortex-A9 has none: a % was a library call per qword).
+        const uint32_t reg = static_cast<uint32_t>(m_regs >> (m_index * 4u)) & 0xFu;
+        if (++m_index == m_nreg)
+            m_index = 0;
         if (reg == 0xEu) // A+D
         {
             const uint8_t address = static_cast<uint8_t>(hi & 0xFFu);
@@ -83,5 +94,6 @@ private:
     uint8_t m_qword[16]{};
     uint32_t m_partial = 0;
     uint32_t m_remaining = 0, m_format = 0, m_nreg = 1, m_index = 0;
+    bool m_hasAd = false; // the PACKED register list has an A+D slot
     uint64_t m_regs = 0;
 };

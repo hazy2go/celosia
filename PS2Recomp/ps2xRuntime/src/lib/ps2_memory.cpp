@@ -1650,6 +1650,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                 }
                 else if (mode == 1)
                 {
+                    ps2_stats::TimeInto timedChain{ps2_stats::vifChainUs};
                     uint32_t tagAddr = m_ioRegisters[channelBase + 0x30];
                     uint32_t asr0 = m_ioRegisters[channelBase + 0x40];
                     uint32_t asr1 = m_ioRegisters[channelBase + 0x50];
@@ -1847,13 +1848,18 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                             appendVifTagData(currentTagAddr);
 
                         if (hasPayload)
+                        {
+                            ps2_stats::chainBytes += static_cast<uint64_t>(tagQwc) * 16u;
                             appendData(dataAddr, tagQwc);
+                        }
                         if (irq && tieEnabled)
                             endChain = true;
                         if (endChain)
                             break;
                     }
 
+                    ++ps2_stats::chainWalks;
+                    ps2_stats::chainTags += static_cast<uint64_t>(tagsProcessed);
                     if (channelBase == 0x10009000u)
                     {
                         ps2_stats::vif1Chains.fetch_add(1, std::memory_order_relaxed);
