@@ -41,6 +41,72 @@ namespace
     }
 
     __attribute__((noinline)) void callee(R5900Context *ctx) { ctx->pc += 4u; }
+
+    // The scheduler check at a loop's back edge, the same in both versions.
+    uint64_t g_protoChecks = 0;
+    [[gnu::noinline]] bool protoCheckpoint()
+    {
+        ++g_protoChecks;
+        return false;
+    }
+
+#include "ps2_vita_proto_old.inc"
+#include "ps2_vita_proto_genlean.inc"
+
+    // The same function as a leaner code generator would emit it: guest
+    // registers in locals (the compiler keeps them in core registers), no pc
+    // or delay-slot bookkeeping per instruction, written back once on the way
+    // out. Same memory macros, same check at the back edge.
+    [[gnu::noinline]] void protoLean_110dd58(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        const uint64_t a0 = GPR_U64(ctx, 4), a3 = GPR_U64(ctx, 7), t0 = GPR_U64(ctx, 8);
+        uint64_t v0, v1, a1 = GPR_U64(ctx, 5), a2 = GPR_U64(ctx, 6);
+        auto sext = [](uint32_t v) { return static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(v))); };
+        for (;;)
+        {
+            v0 = sext(static_cast<uint32_t>(a2) << 2);                                  // sll v0, a2, 2
+            v1 = static_cast<int64_t>(a2) < static_cast<int64_t>(t0) ? 1u : 0u;          // slt v1, a2, t0
+            v0 = sext(static_cast<uint32_t>(v0) + static_cast<uint32_t>(a3));           // addu v0, v0, a3 (delay)
+            if (v1 == 0u)                                                               // beqz v1 -> 0x110dd80
+                goto out;
+            WRITE32(static_cast<uint32_t>(a0) + 16u, static_cast<uint32_t>(a2));        // sw a2, 0x10(a0)
+            v0 = sext(READ32(static_cast<uint32_t>(v0)));                               // lw v0, 0(v0)
+            if (v0 == 0u)                                                               // beql v0, zero -> 0x110dd58
+            {
+                a2 = sext(static_cast<uint32_t>(a2) + 1u);                              // addiu a2, a2, 1 (likely delay)
+                if (protoCheckpoint())
+                {
+                    Ps2SetGprLow64Scalar(ctx, 2, v0), Ps2SetGprLow64Scalar(ctx, 3, v1), Ps2SetGprLow64Scalar(ctx, 6, a2);
+                    ctx->pc = 0x110dd58u;
+                    return;
+                }
+                continue;
+            }
+            a1 = v0;                                                                    // daddu a1, v0, zero
+            break;
+        }
+    out:
+        v0 = a1;                                                                        // jr ra; daddu v0, a1 (delay)
+        Ps2SetGprLow64Scalar(ctx, 2, v0), Ps2SetGprLow64Scalar(ctx, 3, v1), Ps2SetGprLow64Scalar(ctx, 5, a1),
+            Ps2SetGprLow64Scalar(ctx, 6, a2);
+        ctx->pc = GPR_U32(ctx, 31);
+    }
+
+    // A list scan of `length` words, the hit at `hit` (0x110dd58's loop).
+    void protoSetup(uint8_t *rdram, R5900Context *ctx, uint32_t length, uint32_t hit)
+    {
+        std::memset(ctx, 0, sizeof(*ctx));
+        Ps2SetGprLow64Scalar(ctx, 4, 0x200000u);  // a0: the struct (+0x10 written)
+        Ps2SetGprLow64Scalar(ctx, 5, 0x55u);      // a1
+        Ps2SetGprLow64Scalar(ctx, 6, 0u);         // a2: index
+        Ps2SetGprLow64Scalar(ctx, 7, 0x100000u);  // a3: the table
+        Ps2SetGprLow64Scalar(ctx, 8, length);     // t0: its length
+        Ps2SetGprLow64Scalar(ctx, 31, 0x123450u); // ra
+        std::memset(rdram + 0x100000u, 0, length * 4u);
+        const uint32_t value = 0xCAFEu;
+        std::memcpy(rdram + 0x100000u + hit * 4u, &value, 4u);
+        ctx->pc = 0x110dd58u;
+    }
 }
 
 void runVitaMicrobench()
@@ -103,6 +169,46 @@ void runVitaMicrobench()
     run("float->int->float (vmov round trip)", [&]
         { float s = 1.0f; for (uint32_t i = 0; i < kOps; ++i) { uint32_t b; std::memcpy(&b, &s, 4); b ^= (i & 1u); std::memcpy(&s, &b, 4); s += data[i & kMask]; } sink(s); });
 
+    {
+        // The recompiled function as generated now against the lean version:
+        // a 1000-word scan with the hit at 900, many times; the same end state.
+        static R5900Context oldCtx{}, leanCtx{};
+        constexpr int kScans = 2000;
+        const uint64_t t0 = nowUs();
+        for (int i = 0; i < kScans; ++i)
+        {
+            protoSetup(rdram, &oldCtx, 1000u, 900u);
+            protoOld_110dd58(rdram, &oldCtx, nullptr);
+        }
+        const uint64_t t1 = nowUs();
+        uint32_t oldStruct = 0;
+        std::memcpy(&oldStruct, rdram + 0x200010u, 4u);
+        for (int i = 0; i < kScans; ++i)
+        {
+            protoSetup(rdram, &leanCtx, 1000u, 900u);
+            protoLean_110dd58(rdram, &leanCtx, nullptr);
+        }
+        const uint64_t t2 = nowUs();
+        static R5900Context genCtx{};
+        for (int i = 0; i < kScans; ++i)
+        {
+            protoSetup(rdram, &genCtx, 1000u, 900u);
+            protoGenLean_110dd58(rdram, &genCtx, nullptr);
+        }
+        const uint64_t t3 = nowUs();
+        std::fprintf(stderr, "[microbench] proto 0x110dd58: lean-GPR pass output %.1f ns/iteration (v0=%llx)\n", (t3 - t2) * 1000.0 / (kScans * 901.0),
+                     static_cast<unsigned long long>(GPR_U64(&genCtx, 2)));
+        uint32_t leanStruct = 0;
+        std::memcpy(&leanStruct, rdram + 0x200010u, 4u);
+        bool same = oldCtx.pc == leanCtx.pc && oldStruct == leanStruct;
+        for (int r : {2, 3, 4, 5, 6, 7, 8, 31})
+            same = same && GPR_U64(&oldCtx, r) == GPR_U64(&leanCtx, r);
+        const double iterations = kScans * 901.0;
+        std::fprintf(stderr, "[microbench] proto 0x110dd58: generated %.1f ns/iteration, lean %.1f ns/iteration (%.2fx), results %s (v0=%llx a2=%llu pc=%x)\n",
+                     (t1 - t0) * 1000.0 / iterations, (t2 - t1) * 1000.0 / iterations, static_cast<double>(t1 - t0) / std::max<uint64_t>(1, t2 - t1),
+                     same ? "identical" : "DIFFERENT", static_cast<unsigned long long>(GPR_U64(&leanCtx, 2)), static_cast<unsigned long long>(GPR_U64(&leanCtx, 6)),
+                     leanCtx.pc);
+    }
     std::fprintf(stderr, "[microbench] %u ops each, ns per op (the loop's own cost included):\n", kOps);
     for (int i = 0; i < count; ++i)
         std::fprintf(stderr, "[microbench] %-38s %7.2f ns\n", results[i].name, results[i].nsPerOp);
