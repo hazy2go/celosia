@@ -435,6 +435,48 @@ static PS2_FORCE_INLINE void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m1
 #define FAST_WRITE64(addr, val) Ps2FastWrite64(rdram, (uint32_t)(addr), (uint64_t)(val))
 #define FAST_WRITE128(addr, val) Ps2FastWrite128(rdram, (uint32_t)(addr), (val))
 
+#if defined(__arm__) && !defined(__aarch64__)
+// 32-bit ARM (the Vita): a guest load or store is one compare and the access
+// inline; everything that is not plain RAM below 32 MB (mirrors, scratchpad,
+// hardware registers) goes through one shared out-of-line helper with the
+// exact old behaviour. The inline special-address chain, the wrap check and a
+// 4-argument call at every access made the code ~19x the size of the MIPS
+// (the Vita's caches then miss on most of it). RAM carries 64 bytes of slack
+// past 32 MB for an unaligned access at the very end.
+template <typename T>
+[[gnu::noinline, gnu::cold]] T ps2SlowRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t addr);
+template <typename T>
+[[gnu::noinline, gnu::cold]] void ps2SlowWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t addr, T value);
+template <typename T>
+static PS2_FORCE_INLINE T ps2Read(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t addr)
+{
+    if (__builtin_expect(addr < PS2_RAM_SIZE, 1))
+    {
+        T v;
+        std::memcpy(&v, rdram + addr, sizeof(T));
+        return v;
+    }
+    return ps2SlowRead<T>(rdram, ctx, runtime, addr);
+}
+template <typename T>
+static PS2_FORCE_INLINE void ps2Write(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t addr, T value)
+{
+    if (__builtin_expect(addr < PS2_RAM_SIZE, 1))
+        std::memcpy(rdram + addr, &value, sizeof(T));
+    else
+        ps2SlowWrite<T>(rdram, ctx, runtime, addr, value);
+}
+#define READ8(addr) ps2Read<uint8_t>(rdram, ctx, runtime, (uint32_t)(addr))
+#define READ16(addr) ps2Read<uint16_t>(rdram, ctx, runtime, (uint32_t)(addr))
+#define READ32(addr) ps2Read<uint32_t>(rdram, ctx, runtime, (uint32_t)(addr))
+#define READ64(addr) ps2Read<uint64_t>(rdram, ctx, runtime, (uint32_t)(addr))
+#define READ128(addr) ps2Read<__m128i>(rdram, ctx, runtime, (uint32_t)(addr) & ~0xFu)
+#define WRITE8(addr, val) ps2Write<uint8_t>(rdram, ctx, runtime, (uint32_t)(addr), (uint8_t)(val))
+#define WRITE16(addr, val) ps2Write<uint16_t>(rdram, ctx, runtime, (uint32_t)(addr), (uint16_t)(val))
+#define WRITE32(addr, val) ps2Write<uint32_t>(rdram, ctx, runtime, (uint32_t)(addr), (uint32_t)(val))
+#define WRITE64(addr, val) ps2Write<uint64_t>(rdram, ctx, runtime, (uint32_t)(addr), (uint64_t)(val))
+#define WRITE128(addr, val) ps2Write<__m128i>(rdram, ctx, runtime, (uint32_t)(addr) & ~0xFu, (val))
+#else
 #define READ8(addr) ([&]() -> uint8_t {                       \
     uint32_t _addr = (uint32_t)(addr);                        \
     return PS2Runtime::isSpecialAddress(_addr)                \
@@ -532,6 +574,8 @@ static PS2_FORCE_INLINE void Ps2FastWrite128(uint8_t *rdram, uint32_t addr, __m1
             FAST_WRITE128(_addr, _value);                                            \
         }                                                                            \
     } while (0)
+
+#endif
 
 // Packed Compare Greater Than (PCGT)
 #define PS2_PCGTW(a, b) _mm_cmpgt_epi32((__m128i)(a), (__m128i)(b))
@@ -1088,6 +1132,10 @@ static PS2_FORCE_INLINE void Ps2StoreGpr64(R5900Context *ctx, int reg, uint64_t 
 {
     std::memcpy(&ctx->r[reg], &v, sizeof(v));
 }
+// CELOSIA_COUNT_INSTRS=1 at recompile time: every guest instruction counts
+// here (measuring how much MIPS code a frame runs; one thread).
+inline uint64_t g_ps2GuestInstructions = 0;
+#define PS2_COUNT_INSTRUCTIONS(n) (g_ps2GuestInstructions += (n))
 #define PS2_SX32(v) static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(v)))
 #define PS2_ZX32(v) static_cast<uint64_t>(static_cast<uint32_t>(v))
 

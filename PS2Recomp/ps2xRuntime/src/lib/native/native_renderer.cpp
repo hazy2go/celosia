@@ -4,6 +4,7 @@
 #include "native_backend.h"
 #include "runtime/native_tuning.h"
 #include "runtime/ps2_stats.h"
+#include "ps2_runtime_macros.h"
 
 #include <algorithm>
 #include <atomic>
@@ -569,6 +570,11 @@ namespace native_renderer
             std::fprintf(stderr, "[chains] per frame: VIF codes %.0f, copied %.0f KB, GIF qwords scanned %.0f\n", ps2_stats::compactorCodes / 60.0,
                          ps2_stats::compactorCopied / 60.0 / 1024.0, ps2_stats::gifScannedQwords / 60.0);
             ps2_stats::compactorCodes = ps2_stats::compactorCopied = ps2_stats::gifScannedQwords = 0;
+            if (g_ps2GuestInstructions)
+            {
+                std::fprintf(stderr, "[guest] per frame: %.2f M MIPS instructions\n", g_ps2GuestInstructions / 60.0 / 1e6);
+                g_ps2GuestInstructions = 0;
+            }
             std::fprintf(stderr, "[dispatcher] per frame: loop turns %.0f, unwinds pending %.1f deadline %.1f slice %.1f\n",
                          ps2_stats::dispatcherIterations / 60.0, ps2_stats::unwindsPending / 60.0, ps2_stats::unwindsDeadline / 60.0,
                          ps2_stats::unwindsSlice / 60.0);

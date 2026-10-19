@@ -2448,6 +2448,86 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignment
     return top - 0x10u;
 }
 
+#if defined(__arm__) && !defined(__aarch64__)
+// The out-of-line half of the Vita's compact guest loads and stores
+// (ps2Read / ps2Write): everything but plain RAM below 32 MB, as the inline
+// macros did it before.
+namespace
+{
+    template <typename T>
+    T ps2FastReadAny(const uint8_t *rdram, uint32_t addr)
+    {
+        if constexpr (sizeof(T) == 1)
+            return Ps2FastRead8(rdram, addr);
+        else if constexpr (sizeof(T) == 2)
+            return Ps2FastRead16(rdram, addr);
+        else if constexpr (sizeof(T) == 4)
+            return Ps2FastRead32(rdram, addr);
+        else if constexpr (sizeof(T) == 8)
+            return Ps2FastRead64(rdram, addr);
+        else
+            return Ps2FastRead128(rdram, addr);
+    }
+}
+
+template <typename T>
+T ps2SlowRead(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t addr)
+{
+    if (!PS2Runtime::isSpecialAddress(addr))
+        return ps2FastReadAny<T>(rdram, addr);
+    if constexpr (sizeof(T) == 1)
+        return runtime->Load8(rdram, ctx, addr);
+    else if constexpr (sizeof(T) == 2)
+        return runtime->Load16(rdram, ctx, addr);
+    else if constexpr (sizeof(T) == 4)
+        return runtime->Load32(rdram, ctx, addr);
+    else if constexpr (sizeof(T) == 8)
+        return runtime->Load64(rdram, ctx, addr);
+    else
+        return runtime->Load128(rdram, ctx, addr);
+}
+
+template <typename T>
+void ps2SlowWrite(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t addr, T value)
+{
+    if (!PS2Runtime::isSpecialAddress(addr))
+    {
+        if constexpr (sizeof(T) == 1)
+            Ps2FastWrite8(rdram, addr, value);
+        else if constexpr (sizeof(T) == 2)
+            Ps2FastWrite16(rdram, addr, value);
+        else if constexpr (sizeof(T) == 4)
+            Ps2FastWrite32(rdram, addr, value);
+        else if constexpr (sizeof(T) == 8)
+            Ps2FastWrite64(rdram, addr, value);
+        else
+            Ps2FastWrite128(rdram, addr, value);
+        return;
+    }
+    if constexpr (sizeof(T) == 1)
+        runtime->Store8(rdram, ctx, addr, value);
+    else if constexpr (sizeof(T) == 2)
+        runtime->Store16(rdram, ctx, addr, value);
+    else if constexpr (sizeof(T) == 4)
+        runtime->Store32(rdram, ctx, addr, value);
+    else if constexpr (sizeof(T) == 8)
+        runtime->Store64(rdram, ctx, addr, value);
+    else
+        runtime->Store128(rdram, ctx, addr, value);
+}
+
+template uint8_t ps2SlowRead<uint8_t>(uint8_t *, R5900Context *, PS2Runtime *, uint32_t);
+template uint16_t ps2SlowRead<uint16_t>(uint8_t *, R5900Context *, PS2Runtime *, uint32_t);
+template uint32_t ps2SlowRead<uint32_t>(uint8_t *, R5900Context *, PS2Runtime *, uint32_t);
+template uint64_t ps2SlowRead<uint64_t>(uint8_t *, R5900Context *, PS2Runtime *, uint32_t);
+template __m128i ps2SlowRead<__m128i>(uint8_t *, R5900Context *, PS2Runtime *, uint32_t);
+template void ps2SlowWrite<uint8_t>(uint8_t *, R5900Context *, PS2Runtime *, uint32_t, uint8_t);
+template void ps2SlowWrite<uint16_t>(uint8_t *, R5900Context *, PS2Runtime *, uint32_t, uint16_t);
+template void ps2SlowWrite<uint32_t>(uint8_t *, R5900Context *, PS2Runtime *, uint32_t, uint32_t);
+template void ps2SlowWrite<uint64_t>(uint8_t *, R5900Context *, PS2Runtime *, uint32_t, uint64_t);
+template void ps2SlowWrite<__m128i>(uint8_t *, R5900Context *, PS2Runtime *, uint32_t, __m128i);
+#endif
+
 uint8_t PS2Runtime::Load8(uint8_t *rdram, R5900Context *ctx, uint32_t vaddr)
 {
     ps2_stats::noteSlowAccess(vaddr);

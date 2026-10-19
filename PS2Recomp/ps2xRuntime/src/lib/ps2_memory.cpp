@@ -504,8 +504,8 @@ bool PS2Memory::initialize(size_t ramSize)
     try
     {
         // Allocate main RAM
-        m_rdram = new uint8_t[ramSize];
-        std::memset(m_rdram, 0, ramSize);
+        m_rdram = new uint8_t[ramSize + 64u]; // slack: the Vita's inline access past 32 MB - 4
+        std::memset(m_rdram, 0, ramSize + 64u);
 
         // Allocate scratchpad
         m_scratchpad = new uint8_t[PS2_SCRATCHPAD_SIZE];

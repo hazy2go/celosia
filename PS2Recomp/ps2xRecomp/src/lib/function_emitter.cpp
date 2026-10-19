@@ -8,6 +8,7 @@
 #include "ps2recomp/types.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cctype>
 #include <sstream>
 #include <stdexcept>
@@ -90,6 +91,7 @@ namespace ps2recomp
             ss << "#endif\n\n";
         }
 
+        static const bool countInstructions = std::getenv("CELOSIA_COUNT_INSTRS") != nullptr;
         CodeGenerator::AnalysisResult analysisResult = cg.collectInternalBranchTargets(function, instructions);
         std::vector<uint32_t> resumeTargets(analysisResult.resumeEntryPoints.begin(),
                                             analysisResult.resumeEntryPoints.end());
@@ -203,6 +205,8 @@ namespace ps2recomp
                     }
                     else
                     {
+                        if (countInstructions)
+                            ss << "    PS2_COUNT_INSTRUCTIONS(2);\n"; // the branch and its delay slot
                         ss << cg.handleBranchDelaySlots(inst, *delaySlot, function, analysisResult);
                     }
 
@@ -236,6 +240,8 @@ namespace ps2recomp
                         continue;
                     }
 
+                    if (countInstructions)
+                        ss << "    PS2_COUNT_INSTRUCTIONS(1);\n";
                     const MemoryAccessHint memoryHint = resolveMemoryAccessHint(inst, constantRegisters);
                     const std::string translated = cg.translateInstruction(inst, memoryHint);
                     if (translationObservesPc(translated))
