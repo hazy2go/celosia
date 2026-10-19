@@ -157,19 +157,30 @@ namespace ps2recomp
         ss << "extern const uint32_t g_ps2RecompiledFunctionTableSlotCount = " << std::dec << slotCount << "u;\n";
         ss << "PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[" << std::dec << (slotCount == 0u ? 1u : slotCount) << "u] = {};\n\n";
 
+        // The entries as constant data filled in by one loop: as one statement
+        // per entry (~140k) the constructor took GCC over 20 minutes at -Os.
         ss << "namespace {\n";
-        ss << "struct GeneratedFunctionTableInitializer {\n";
-        ss << "    GeneratedFunctionTableInitializer() {\n";
+        ss << "struct GeneratedFunctionTableEntry { uint32_t slot; PS2Runtime::RecompiledFunction function; };\n";
+        ss << "const GeneratedFunctionTableEntry kGeneratedFunctionTableEntries[] = {\n";
         for (const auto &[address, name] : entries)
         {
             const uint32_t slot = (address - tableBase) >> 2;
-            ss << "        g_ps2RecompiledFunctionTable[" << std::dec << slot << "] = " << name
-               << "; // 0x" << std::hex << address << std::dec << "\n";
+            ss << "    {" << std::dec << slot << "u, " << name << "},\n";
         }
+        if (entries.empty())
+        {
+            ss << "    {0u, nullptr},\n";
+        }
+        ss << "};\n";
+        ss << "struct GeneratedFunctionTableInitializer {\n";
+        ss << "    GeneratedFunctionTableInitializer() {\n";
+        ss << "        for (const GeneratedFunctionTableEntry &entry : kGeneratedFunctionTableEntries)\n";
+        ss << "            if (entry.function)\n";
+        ss << "                g_ps2RecompiledFunctionTable[entry.slot] = entry.function;\n";
         ss << "    }\n";
         ss << "};\n";
         ss << "static const GeneratedFunctionTableInitializer g_generatedFunctionTableInitializer;\n";
-        ss << "}\n";
+        ss << "}\n\n";
 
         return ss.str();
     }

@@ -564,6 +564,13 @@ if(PS2X_ENABLE_RUNNER_PCH)
     )
 
     target_precompile_headers(ps2EntryRunner PRIVATE ${PS2X_RUNNER_PCH_HEADERS})
+    # ccache hashes through a precompiled header only with these (and its
+    # sloppiness pch_defines,time_macros, which ./celosia sets).
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(ps2EntryRunner PRIVATE -fpch-preprocess)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(ps2EntryRunner PRIVATE "SHELL:-Xclang -fno-pch-timestamp")
+    endif()
 endif()
 
 if(PS2X_DEFAULT_BOOT_ELF_DEFINE)

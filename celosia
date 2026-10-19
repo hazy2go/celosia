@@ -104,6 +104,8 @@ compiler_cache_args() {
     command -v ccache >/dev/null 2>&1 &&
         echo "-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
 }
+# Precompiled headers are cacheable with this (see the runner's CMakeLists).
+export CCACHE_SLOPPINESS=${CCACHE_SLOPPINESS:-pch_defines,time_macros}
 
 recompile() {
     local dir=$1
@@ -113,9 +115,10 @@ recompile() {
     (cd "$dir" && "$RECOMP" config.toml >recomp.log 2>&1) ||
         { tail -20 "$dir/recomp.log"; die "recompiler failed (log: $dir/recomp.log)"; }
     # Only the files whose content changed are replaced (by checksum): the
-    # rest keep their time, so a regeneration rebuilds what it changed.
+    # rest keep their time, so a regeneration rebuilds what it changed. No
+    # -a/-t: copying the times would mark every file new.
     mkdir -p "$RUNNER_DIR"
-    rsync -a --checksum --delete --include='*.cpp' --include='*.h' --exclude='*' "$dir/output/" "$RUNNER_DIR/"
+    rsync -r --checksum --delete --include='*.cpp' --include='*.h' --exclude='*' "$dir/output/" "$RUNNER_DIR/"
     # New/removed files change the source glob.
     cmake "$CMAKE_DIR" >"$LOGS/configure.log" 2>&1
     build_target ps2EntryRunner
