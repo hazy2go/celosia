@@ -207,6 +207,20 @@ namespace ps2recomp
         m_ss << fmt::format("{}}}\n", indent);
     }
 
+    // Leaving the function for `target`, a guest address in another one. A
+    // forward one is reached by calling the function there (it resumes at
+    // ctx->pc through its switch), as the dispatcher would after this frame
+    // returned to it: the functions the analysis split one routine into chain
+    // without a dispatcher turn each (~40k a frame in the opening). A backward
+    // one is a checkpoint and nests boundedly (ps2TransferTo).
+    void ControlFlowEmitter::emitExternalTransfer(uint32_t target, std::string_view indent)
+    {
+        m_ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, target);
+        if (!m_gen.getTransferFunctionName(target).empty())
+            m_ss << fmt::format("{}ps2TransferTo(rdram, ctx, runtime, 0x{:X}u{});\n", indent, target, target > branchPc() ? "" : ", true");
+        m_ss << indent << "return;\n";
+    }
+
     bool ControlFlowEmitter::emitDirectFunctionJumpIfAvailable(uint32_t target, StaticBranchKind kind, std::string_view indent)
     {
         if (kind != StaticBranchKind::Jump)
@@ -217,7 +231,11 @@ namespace ps2recomp
         const std::string functionName = m_gen.getFunctionName(target);
         if (functionName.empty())
         {
-            return false;
+            // A resume entry in another function: through the function table.
+            if (m_gen.getTransferFunctionName(target).empty())
+                return false;
+            m_ss << fmt::format("{}ps2TransferTo(rdram, ctx, runtime, 0x{:X}u{}); return;\n", indent, target, target > branchPc() ? "" : ", true");
+            return true;
         }
 
         m_ss << indent << functionName << "(rdram, ctx, runtime); return;\n";
@@ -526,8 +544,7 @@ namespace ps2recomp
             }
             else
             {
-                m_ss << fmt::format("            ctx->pc = 0x{:X}u;\n", target);
-                m_ss << "            return;\n";
+                emitExternalTransfer(target, "            ");
             }
             m_ss << "        }\n";
         }
@@ -547,8 +564,7 @@ namespace ps2recomp
             }
             else
             {
-                m_ss << fmt::format("            ctx->pc = 0x{:X}u;\n", target);
-                m_ss << "            return;\n";
+                emitExternalTransfer(target, "            ");
             }
             m_ss << "        }\n";
         }

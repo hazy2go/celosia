@@ -1073,6 +1073,24 @@ static PS2_FORCE_INLINE float ps2VuRsqrtQ(float fs, float ft)
     return ps2VuNormalizeScalar(fs / sqrtf(std::fabs(ft)));
 }
 
+// Lean generated code (CELOSIA_LEAN_GPRS at recompile time) keeps a
+// function's guest registers in locals and moves them to and from the
+// context only around calls and returns: the low 64 bits, as plain integers
+// on every platform (the upper 64 bits are only ever MMI's, which stay in the
+// context).
+static PS2_FORCE_INLINE uint64_t Ps2LoadGpr64(const R5900Context *ctx, int reg)
+{
+    uint64_t v;
+    std::memcpy(&v, &ctx->r[reg], sizeof(v));
+    return v;
+}
+static PS2_FORCE_INLINE void Ps2StoreGpr64(R5900Context *ctx, int reg, uint64_t v)
+{
+    std::memcpy(&ctx->r[reg], &v, sizeof(v));
+}
+#define PS2_SX32(v) static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(v)))
+#define PS2_ZX32(v) static_cast<uint64_t>(static_cast<uint32_t>(v))
+
 #if defined(__arm__) && !defined(__aarch64__)
 // 32-bit ARM (the Vita): a GPR's low 64 bits read and written as plain
 // integers. Through the SSE emulation every access moved the value between

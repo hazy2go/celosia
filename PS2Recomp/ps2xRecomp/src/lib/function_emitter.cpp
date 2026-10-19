@@ -2,6 +2,7 @@
 #include "ps2recomp/code_generator.h"
 #include "ps2recomp/gif_dma_kick_analyzer.h"
 #include "ps2recomp/instructions.h"
+#include "ps2recomp/lean_gprs.h"
 #include "ps2recomp/r5900_decoder.h"
 #include "ps2recomp/recompiler_reporter.h"
 #include "ps2recomp/types.h"
@@ -268,9 +269,13 @@ namespace ps2recomp
         {
             ss << "    ctx->pc = 0x" << std::hex << function.end << "u;\n"
                << std::dec;
+            // The code goes on in the next function: run it from here (it
+            // starts or resumes at ctx->pc) instead of a dispatcher turn.
+            if (!cg.getTransferFunctionName(function.end).empty())
+                ss << "    ps2TransferTo(rdram, ctx, runtime, 0x" << std::hex << function.end << "u);\n" << std::dec;
         }
 
         ss << "}\n";
-        return ss.str();
+        return leanGprsEnabled() ? leanGprs(ss.str()) : ss.str();
     }
 }

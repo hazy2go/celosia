@@ -148,12 +148,23 @@ namespace ps2recomp
     void CodeGenerator::setResumeEntryTargets(const std::unordered_map<uint32_t, std::vector<uint32_t>> &resumeTargetsByOwner)
     {
         m_resumeEntryTargetsByOwner = resumeTargetsByOwner;
+        m_resumeEntryOwnerByTarget.clear();
         for (auto &[owner, targets] : m_resumeEntryTargetsByOwner)
         {
-            (void)owner;
             std::sort(targets.begin(), targets.end());
             targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+            for (uint32_t target : targets)
+                m_resumeEntryOwnerByTarget.emplace(target, owner);
         }
+    }
+
+    std::string CodeGenerator::getTransferFunctionName(uint32_t target) const
+    {
+        std::string name = getFunctionName(target);
+        if (!name.empty())
+            return name;
+        const auto owner = m_resumeEntryOwnerByTarget.find(target);
+        return owner != m_resumeEntryOwnerByTarget.end() ? getFunctionName(owner->second) : std::string();
     }
 
     void CodeGenerator::setEmitInstructionComments(bool emitInstructionComments)

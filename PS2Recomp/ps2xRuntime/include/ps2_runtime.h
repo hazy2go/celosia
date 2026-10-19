@@ -592,4 +592,35 @@ extern const uint32_t g_ps2RecompiledFunctionTableEnd;
 extern const uint32_t g_ps2RecompiledFunctionTableSlotCount;
 extern PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[];
 
+// Generated code going on at a guest address another recompiled function
+// holds, ctx->pc already set to it: through the function table, as the
+// dispatcher would run it (overrides registered there apply), but without a
+// return to the dispatcher first. Nothing there: the caller returns and the
+// dispatcher reports it.
+// A backward transfer may be a loop across two functions: it is a scheduler
+// checkpoint, as a loop inside one is, and transfers nest at most
+// kPs2MaxTransferDepth deep (then the dispatcher takes over, once per that
+// many turns of such a loop). Guest code runs on one thread.
+inline constexpr int kPs2MaxTransferDepth = 16;
+inline int g_ps2TransferDepth = 0;
+inline void ps2TransferTo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t target, bool backward = false)
+{
+    if (backward && runtime->eeCheckpointDue())
+        return;
+    if (g_ps2TransferDepth >= kPs2MaxTransferDepth)
+        return;
+    const uint32_t slot = (target - g_ps2RecompiledFunctionTableBase) >> 2;
+    if (slot >= g_ps2RecompiledFunctionTableSlotCount)
+        return;
+    const PS2Runtime::RecompiledFunction fn = g_ps2RecompiledFunctionTable[slot];
+    if (!fn)
+        return;
+    struct Nested // restored however the call ends (an unwind to the dispatcher throws through)
+    {
+        Nested() { ++g_ps2TransferDepth; }
+        ~Nested() { --g_ps2TransferDepth; }
+    } nested;
+    fn(rdram, ctx, runtime);
+}
+
 #endif // PS2_RUNTIME_H

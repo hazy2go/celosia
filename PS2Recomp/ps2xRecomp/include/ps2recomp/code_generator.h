@@ -70,6 +70,7 @@ namespace ps2recomp
         std::unordered_set<uint32_t> m_dynamicImmediates;
         std::unordered_map<uint32_t, std::vector<uint32_t>> m_configJumpTableTargetsByAddress;
         std::unordered_map<uint32_t, std::vector<uint32_t>> m_resumeEntryTargetsByOwner;
+        std::unordered_map<uint32_t, uint32_t> m_resumeEntryOwnerByTarget; // each resume entry's owner function
         const std::vector<Section>& m_sections;
         BootstrapInfo m_bootstrapInfo;
         bool m_emitInstructionComments = true;
@@ -204,6 +205,10 @@ namespace ps2recomp
 
         const Symbol *findSymbolByAddress(uint32_t address) const;
         std::string getFunctionName(uint32_t address) const;
+        // The function to call, with ctx->pc set to `target`, to continue at a
+        // guest address outside the current function: one that starts there,
+        // or one with a resume entry there. Empty when there is none.
+        std::string getTransferFunctionName(uint32_t target) const;
         std::string sanitizeFunctionName(const std::string& name) const;
     };
 
