@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="254" viewBox="0 0 720 254" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-label="Game logic milliseconds per frame in the opening on a PS Vita, per build">
+<style>.bg{fill:#fcfcfb}.ink{fill:#0b0b0b}.ink2{fill:#52514e}.muted{fill:#898781}.grid{stroke:#e4e3df}.bar{fill:#2a78d6}.target{stroke:#0b0b0b}@media (prefers-color-scheme: dark){.bg{fill:#1a1a19}.ink{fill:#f0efec}.ink2{fill:#c3c2b7}.grid{stroke:#33332f}.bar{fill:#4f95e8}.target{stroke:#f0efec}}</style>
+<rect class="bg" width="720" height="254" rx="8"/>
+<text class="ink" x="150" y="26" font-size="15" font-weight="600">Opening cinematic on a PS Vita: game logic per frame</text>
+<text class="ink2" x="150" y="44" font-size="12">milliseconds, lower is better; 30 fps needs the whole frame under 33 ms</text>
+<line class="grid" x1="150.0" y1="72" x2="150.0" y2="218" stroke-width="1"/>
+<text class="muted" x="150.0" y="236" font-size="11" text-anchor="middle">0</text>
+<line class="grid" x1="251.9" y1="72" x2="251.9" y2="218" stroke-width="1"/>
+<text class="muted" x="251.9" y="236" font-size="11" text-anchor="middle">50</text>
+<line class="grid" x1="353.8" y1="72" x2="353.8" y2="218" stroke-width="1"/>
+<text class="muted" x="353.8" y="236" font-size="11" text-anchor="middle">100</text>
+<line class="grid" x1="455.8" y1="72" x2="455.8" y2="218" stroke-width="1"/>
+<text class="muted" x="455.8" y="236" font-size="11" text-anchor="middle">150</text>
+<line class="grid" x1="557.7" y1="72" x2="557.7" y2="218" stroke-width="1"/>
+<text class="muted" x="557.7" y="236" font-size="11" text-anchor="middle">200</text>
+<line class="grid" x1="659.6" y1="72" x2="659.6" y2="218" stroke-width="1"/>
+<text class="muted" x="659.6" y="236" font-size="11" text-anchor="middle">250</text>
+<text class="ink2" x="138" y="97.0" font-size="12" text-anchor="end">CPU fixes</text>
+<path class="bar" d="M150,76 H645.4 a4,4 0 0 1 4,4 V106 a4,4 0 0 1 -4,4 H150 Z"/>
+<text class="ink" x="657.4" y="97.0" font-size="12" font-weight="600">245 ms</text>
+<text class="ink2" x="138" y="149.0" font-size="12" text-anchor="end">code size, VU0</text>
+<path class="bar" d="M150,128 H637.3 a4,4 0 0 1 4,4 V158 a4,4 0 0 1 -4,4 H150 Z"/>
+<text class="ink" x="649.3" y="149.0" font-size="12" font-weight="600">241 ms</text>
+<text class="ink2" x="138" y="201.0" font-size="12" text-anchor="end">direct transfers</text>
+<path class="bar" d="M150,180 H568.0 a4,4 0 0 1 4,4 V210 a4,4 0 0 1 -4,4 H150 Z"/>
+<text class="ink" x="580.0" y="201.0" font-size="12" font-weight="600">207 ms</text>
+<line class="target" x1="217.9" y1="68" x2="217.9" y2="218" stroke-width="2" stroke-dasharray="4 3"/>
+<text class="ink" x="223.9" y="66" font-size="11">30 fps</text>
+</svg>

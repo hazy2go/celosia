@@ -1,209 +1,217 @@
-# Celosia
+# Celosia Vita
 
-A native port of **Shadow of the Colossus** (PS2, USA, SCUS-97472) to macOS
-(Apple Silicon) and the **PS Vita**, built by statically recompiling the
-game's MIPS code to C++ with [PS2Recomp](https://github.com/ran-j/PS2Recomp).
+**Shadow of the Colossus (PS2, USA, SCUS-97472) running natively on the PS Vita.**
 
-No emulator runs the game's CPU code. The EE code from the boot ELF and the
-game's three XFF modules is translated into C++ ahead of time and compiled
-natively. The game is drawn by a native renderer (Metal on the Mac, OpenGL
-ES on the Vita) that reads its model data directly. The rest of the hardware
-it talks to (DMA, IOP, SPU2) is reimplemented as host code.
+The game's MIPS code is statically recompiled to C++ and compiled for the
+Vita's ARM CPU; a native OpenGL ES renderer draws its models directly. No
+emulator runs the game. This repository is a Vita-first fork of
+[HenryKun55/celosia](https://github.com/HenryKun55/celosia): every change here
+is measured on a real Vita, not in Vita3K.
 
-**Where it stands: [docs/STATUS.md](docs/STATUS.md)** (and the live
-[status dashboard](https://claude.ai/artifact/1RnzZd7UBKjDKzogkGEFN9)).
+![The opening cinematic, rendered on a PS Vita](docs/vita/opening_strip.png)
+<sub>The opening cinematic, captured on a PS Vita with this build.</sub>
 
 > **No game data is included.** You need your own copy of the game.
 
+## Contents
+
+- [Status](#status)
+- [Why it is slow, and the plan](#why-it-is-slow-and-the-plan)
+- [What this fork changed](#what-this-fork-changed)
+- [Building](#building)
+- [Installing on the Vita](#installing-on-the-vita)
+- [A real Vita as a dev console](#a-real-vita-as-a-dev-console)
+- [Measuring](#measuring)
+- [Layout](#layout)
+- [Credits and license](#credits-and-license)
+
 ## Status
 
-![What is native](docs/port_status.svg)
+Boots, plays the logos and menus, and renders the 3D game correctly. **3D
+scenes are far from playable speed yet.**
 
-| Area | State |
-| --- | --- |
-| Boot, logos, intro cinematic | ✅ |
-| Native renderer (models, characters, 2D, fog, bloom, shadows, reflections, water…) | ✅ all 49 tracked features native |
-| Audio (SPU2: voices, ADSR, reverb, streaming) | ✅ |
-| Title screen, menus | ✅ |
-| Memory card (libmc2, PCSX2-compatible `memcards/Mcd001.ps2`) | ✅ |
-| New Game, intro, riding Agro, gameplay | ✅ |
-| Performance, Mac (M4 Pro) | 60 fps, drawn at 1536×1344 |
-| PS Vita | ✅ builds and runs (18–25 fps in Vita3K's intro); fidelity and speed in progress |
-| Decompilation | started: software doubles rewritten and proven ([docs/decomp.md](docs/decomp.md)) |
+| On a PS Vita (444 MHz) | Upstream | This fork |
+| --- | --- | --- |
+| Menus and 2D screens | 30-33 fps | **~55 fps** |
+| Regular freezes (0.8-1 s every 5 s) | yes | **fixed** |
+| Opening cinematic | 2-5 fps | ~4.5 fps |
 
-## Requirements
+![Game logic per frame in the opening cinematic, per build](docs/vita/perf.svg)
 
+Rendering is not the problem: the GPU side takes 2-12 ms of a frame. The time
+goes to the game's own logic (animation, camera, physics), recompiled.
+
+## Why it is slow, and the plan
+
+The recompiled code works but is heavy. Each PS2 instruction becomes a lot of
+ARM work: guest registers live in memory as 128-bit values and are loaded and
+stored around every operation, every instruction carries bookkeeping (the
+current pc, delay-slot state), every memory access runs checks, and control
+flow between functions goes through a scheduler. A fast desktop CPU hides
+this; the Vita's Cortex-A9 cannot. The same logic takes ~13 ms a frame on an
+Apple M4 and 170-240 ms on the Vita.
+
+The PS2 runs this game at 30 fps on a 294 MHz CPU, and the Vita's CPU is not
+slower per clock. So a lean translation can get there; the current one is ~6x
+too heavy. The plan:
+
+1. **A lean code generator** for the Vita: guest registers in local variables
+   (real CPU registers), bookkeeping only where something can observe it,
+   plain RAM accesses without checks where the address is known, direct calls.
+   Proven first on hot functions against the current output, then rolled out
+   hottest-first, each function checked byte-for-byte against the old one on
+   the same machine state.
+2. **Less display-list work per frame** (~30 ms): the DMA/VIF lists are still
+   walked to keep emulated registers consistent although the native renderer
+   draws the models itself.
+3. **Then the picture:** bring back what the Vita build leaves out today
+   (bloom, glow, depth of field, depth fog, soft shadows) within the frame time
+   won, checked against the Mac build with scripted screenshot routes.
+
+## What this fork changed
+
+Every item was measured on the device. Results identical to the original code
+unless noted.
+
+**Vita runtime**
+- CPU 444 MHz, GPU 222 MHz at start (apps begin at 333 MHz).
+- No dimming or standby during cutscenes (`sceKernelPowerTick`).
+- Logs buffered and written every 5 s: the regular ~0.85 s freezes were every
+  thread waiting on a stats dump being written to the memory card.
+- Disc streaming reads whole runs of sectors instead of 2 KB at a time.
+- A linker script that always leaves room for the SCE import data.
+
+**Recompiled code on 32-bit ARM**
+- Guest registers read and written as plain integers instead of through the
+  SSE emulation (60 -> 22 ns per read+write).
+- No memory barriers on the dispatch path (each `dmb` is ~34 ns on the A9,
+  and every guest call ran several).
+- VU0 vector math: the float normalisation in 6 NEON instructions instead of
+  ~10 (bit-exact over 10M patterns), broadcasts as one `vdup` instead of a
+  table lookup.
+- Rare paths moved out of line: the game's code segment went from 59.8 to
+  49.0 MB.
+- **Direct transfers between split functions:** the recompiler's analysis
+  splits routines into pieces, and every jump between pieces went back
+  through the scheduler. They now run directly, through the function table so
+  overrides still apply: 42k -> 12k scheduler turns a frame, -15% game time.
+
+Ruled out by measurement: the scheduler's exception-based thread switches
+(~1%), a fast non-exact FPU mode (no gain), trimming per-instruction pc stores
+alone (no gain).
+
+## Building
+
+The game code is generated on a Mac, then compiled for the Vita. The Mac
+build also serves as the correctness reference.
+
+**Requirements**
 - macOS on Apple Silicon, Xcode Command Line Tools
 - `brew install cmake ninja pkg-config ffmpeg python`
-- A disc image of **Shadow of the Colossus (USA)** (`SCUS_974.72`), as an
-  `.iso` or a `.zip` containing one
-- About 10 GB of free disk space and an internet connection for the first build
-  (CMake downloads raylib, imgui and sse2neon)
+- [VitaSDK](https://vitasdk.org) in `~/vitasdk` (or `$VITASDK`), with
+  `vitaShaRK libmathneon SceShaccCgExt taihen kubridge sdl2 zlib`
+  (`vdpm install ...`)
+- Your disc image of **Shadow of the Colossus (USA)** as `.iso` or a `.zip`
+  containing one; about 10 GB free
 
-## Quick start
+**Steps**
 
 ```sh
-git clone git@github.com:HenryKun55/celosia.git
+git clone https://github.com/hazy2go/celosia.git
 cd celosia
-./celosia setup --iso "/path/to/Shadow of the Colossus (USA).iso"
-./celosia run
+./celosia setup --iso "/path/to/Shadow of the Colossus (USA).iso"   # extract, capture, recompile (Mac)
+./celosia vita                                                      # build/vita/ps2xRuntime/ps2EntryRunner.vpk
 ```
 
-`setup` takes a while the first time: it compiles the runtime and around 16k
-recompiled functions. It briefly opens the game window a few times while it
-captures each module (see below).
+`setup` takes a while: it compiles ~16k recompiled functions and briefly opens
+the game window a few times while it captures each module. The first `vita`
+build also builds vitaGL at a pinned revision with this port's patches.
 
-### Settings
-
-- **F1** (Select twice on the Vita): the player menu. Video, sound,
-  language, in Portuguese or English.
-- **F10** (Mac): the native renderer's panel. Resolution (× 512×448), bloom
-  strength, fog amount and every effect on/off, changed live. "Print to log"
-  gives the setting as `SOTC_*` variables that set it at start. The table is
-  in [docs/STATUS.md](docs/STATUS.md#settings).
-- **F12**: the developer debugger (CPU, threads, DMA, memory).
-
-### Controls
-
-A gamepad works out of the box. Keyboard:
-
-| Keys | PS2 |
+| Command | |
 | --- | --- |
-| W A S D | left stick |
-| arrows | D-pad |
-| H / J | ✕ / ○ |
-| Y / U | □ / △ |
-| I / O | L1 / L2 |
-| K / L | R1 / R2 |
-| Z / X | Start / Select |
+| `./celosia setup [--iso PATH]` | full pipeline: extract, capture modules, recompile, build (Mac) |
+| `./celosia recompile` | regenerate the game code (after changing the recompiler) |
+| `./celosia vita` | build the Vita VPK |
+| `./celosia run` | play on the Mac (the reference build) |
+| `./celosia clean` | delete `build/` |
 
-## How it works
+## Installing on the Vita
 
-Shadow of the Colossus ships one small boot ELF and loads the rest of its code
-at run time: `KERNEL.XFF`, `MANAGER.XFF` and `GAMECORE.XFF`. These are
-relocatable modules that the game links in memory with its own dynamic linker.
-A static recompiler needs all of that code up front, so `setup` bootstraps it
-in stages:
+Needs a hacked Vita (HENkaku / Ensō) with VitaShell.
 
-1. **Boot ELF.** Function boundaries are recovered with `tools/funcmap_elf.py`.
-   Symbol names come from `KERNEL.XFF`'s imports. The ELF is recompiled with
-   `game/scus.toml`.
-2. **Module capture.** The game runs until it jumps into code that is not
-   recompiled yet, which is the next module's entry point. Guest RAM is saved
-   at that moment (`PS2X_DUMP_RAM_ON_MISSING`). The loaded module (sections at
-   their final addresses, symbols resolved) is cut out of the dump.
-   `tools/modimage.py` locates the module header automatically.
-3. **Link.** `tools/build_elf.py` merges the boot ELF and every captured module
-   into one `SOTC.elf`, with a function map and the list of instructions the
-   guest linker rewrites (`dynamic_imm.txt`). The recompiler decodes those
-   instructions from memory at run time. `tools/gen_config.py` writes the
-   recompiler config.
-4. Steps 2 and 3 repeat for KERNEL → MANAGER → GAMECORE.
-5. **VU1.** A scripted run records every VU1 microcode image the game uploads.
-   Each image is compiled to C++ (`./celosia vu1`). New images seen while
-   playing are saved automatically, and `./celosia vu1` picks them up.
+1. `ur0:data/libshacccg.suprx` must exist (the runtime shader compiler; run
+   ShaRKBR33D once if it does not).
+2. Install the `.vpk` with VitaShell.
+3. Copy the extracted disc (`disc/` after `setup`) to `ux0:data/celosia/disc/`.
+   Over USB it takes a few minutes; WiFi FTP runs at under 1 MB/s.
 
-Everything generated (recompiled code, captures, build files) goes to
-`build/`. None of it is committed.
+Saves go to `ux0:data/celosia/memcards/`, logs to `ux0:data/celosia/log.txt`
+and `err.txt`. The Vita has no environment: `ux0:data/celosia/env.txt` takes
+`NAME=value` lines. In game, **Select twice** opens the player menu (video,
+sound, language); the rear touchpad halves stand in for L2 / R2.
 
-## PS Vita
+## A real Vita as a dev console
 
-```sh
-export VITASDK=~/vitasdk
-./celosia vita          # after ./celosia setup: build/vita/ps2xRuntime/ps2EntryRunner.vpk
-```
+Every number above comes from this loop, driven from the Mac:
 
-The first run also builds vitaGL at a pinned revision with this port's
-patches. Install the `.vpk` (VitaShell, or File › Install in Vita3K). Then
-put the extracted disc in `ux0:data/celosia/disc/`. Saves go to
-`ux0:data/celosia/memcards/` and logs to `ux0:data/celosia/log.txt` and
-`err.txt`. The Vita has no environment: `ux0:data/celosia/env.txt` takes
-`NAME=value` lines (for example `PS2X_PROFILE=ux0:data/celosia/prof.txt`).
+- [vitacompanion](https://github.com/devnoname120/vitacompanion) (FTP on
+  1337, commands on 1338, simulated input) and
+  [udcd_uvc](https://github.com/xerpi/vita-udcd-uvc) (the screen as a USB
+  camera) in `ur0:tai/config.txt`.
+- `tools/vita_dev.sh` (set `VITA_IP`):
 
-## Decompilation
-
-The recompiled code works but is not readable. Functions that matter are
-being rewritten by hand in C++ and proven equal to the recompiled ones, byte
-for byte, on the same machine state (`SOTC_DIFFTEST`). It is a functional
-decomp, not a matching one. The workflow (guest profiler, Ghidra scripts,
-difftest) is in [docs/decomp.md](docs/decomp.md).
-
-## Commands
-
-```
-./celosia setup [--iso PATH]   full pipeline (extract → capture → recompile → build)
-./celosia run                  play (log: logs/play.log)
-./celosia vu1                  compile newly seen VU1 microcode and rebuild
-./celosia recompile            relink modules, recompile and rebuild
-./celosia build                rebuild after editing PS2Recomp sources
-./celosia autotest [s] [int]   scripted run, screenshots every int s in shots/run
-./celosia vita                 build the PS Vita VPK
-./celosia clean                delete build/
-```
-
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `CELOSIA_DISC` | `./disc` | extracted disc |
-| `CELOSIA_BUILD` | `./build` | build and generated code |
-| `CELOSIA_JOBS` | CPU count | parallel compile jobs |
-| `CELOSIA_CMAKE_ARGS` | | extra CMake configure arguments |
-
-### Runtime switches (debugging)
-
-| Variable | Effect |
+| Command | |
 | --- | --- |
-| `PS2X_INPUT_SCRIPT="11:DOWN:0.3;12:CROSS:0.3"` | scripted button presses (second:button:duration) |
-| `PS2X_SNAPSHOT_DIR` / `PS2X_SNAPSHOT_SECONDS` | periodic screenshots |
-| `PS2X_STATS=1` | frame, VU1 and GS statistics |
-| `PS2X_GS_BOB=1` | bob deinterlacing instead of weave |
-| `PS2X_GS_THREADS=n` | raster threads |
-| `SOTC_NATIVE=1` / `2` | native renderer shown (default) / drawn but not shown, for side-by-side checks |
-| `SOTC_NATIVE_GL=1` / `check` | the OpenGL renderer on the Mac / compared against Metal |
-| `PS2X_GS_GPU=0` | emulated view rasterized on the CPU (exact GS fog: the reference for fidelity checks) |
-| `PS2X_MTVU=0` | run VIF1/VU1/GIF on the game thread instead of their own thread |
-| `PS2X_GIF_THREAD=0` | process GIF packets on the VU1 thread instead of their own |
-| `PS2X_GS_PROFILE=1` | where GS raster time goes, and what flushes the draw queue |
-| `PS2X_VU1_NOREC=1` / `PS2X_VU1_REC_VERIFY=1` | interpret VU1 / cross-check the recompiled VU1 against the interpreter |
-| `PS2X_WATCH_WRITE=start:end` | log guest stores to an address range |
-| `PS2X_DUMP_RAM_AT_SECONDS=n` + `PS2X_DUMP_RAM_PATH` | save guest RAM |
+| `push` | the new `eboot.bin` only (seconds, no reinstall) |
+| `bench [s]` | scripted New Game route timed in guest VBlanks, then the logs |
+| `run [s]` / `env file` | a plain run / set `env.txt` |
+| `stats` | the fps and frame-time lines of the last run |
+| `shot` | one frame from the USB camera |
 
-`tools/` also has analysis helpers: `addr2sym.py`, `callers.py`, `xref.py`
-(symbols and call graph), `vudis.py` (VU disassembler), `gsdecode.py`,
-`dmawalk.py`, `xffinfo.py`. Also:
-- `native_run.sh` and `native_sbs.py`: the emulated and native pictures of
-  the same moment, side by side;
-- `ghidra.sh`: Ghidra headless scripts;
-- `guest_profile.py` and `vita_profile.py`: the guest and Vita3K profilers;
-- `vita3k.sh`: a separate Vita3K tree for testing.
+It keeps the Vita's screen off between runs, peels the lock screen away by
+touch and taps every 10 s so the console never idles into standby.
+
+## Measuring
+
+`env.txt` switches for the Vita:
+
+| Variable | |
+| --- | --- |
+| `SOTC_NATIVE_LOG_UPLOADS=1` | per 60 frames: `[frametime]` (frame, render, game), `[framesplit]` (model code, display lists, disc reads), `[framewait]`, `[dispatcher]`, `[hitch]` for any frame over 250 ms |
+| `CELOSIA_MICROBENCH=1` | nanoseconds per building block of the recompiled code, on the device, before the game starts |
+| `SOTC_VITA_SHOT_SECONDS=n` | the shown picture every n s to `ux0:data/celosia/shots/` |
+| `PS2X_PROFILE=ux0:data/celosia/prof.txt` | guest sampling profiler (`tools/guest_profile.py`) |
+| `PS2X_STATS=1` | the full runtime statistics (off by default: they cost frames) |
+
+Benchmark scene: the opening cinematic plays by itself after boot, the same
+every run. `tools/vita_perf_chart.py` redraws the chart above.
 
 ## Layout
 
 ```
-celosia                 the CLI
-game/                   SotC-specific: boot ELF config, stub bindings, runtime overrides
-tools/                  pipeline (XFF/ELF handling, function maps) and debug tools
-PS2Recomp/              recompiler + runtime (git subtree of ran-j/PS2Recomp, with our changes)
+celosia                 the CLI (setup, recompile, vita, run)
+game/                   SotC-specific: config, runtime overrides, the native model path
+PS2Recomp/              recompiler + runtime (ran-j/PS2Recomp, with upstream's and our changes)
+  ps2xRecomp/           the code generator
+  ps2xRuntime/          runtime; platform/vita/ the Vita backend
+tools/                  pipeline, analysis, vita_dev.sh, vita_perf_chart.py
+docs/vita/              this README's images
 ```
 
-Changes to PS2Recomp are kept generic: SPU2, VU1 AOT, asynchronous GS, VU0
-fixes. They are meant to go back upstream.
+## Credits and license
 
-## Credits
-
+- [HenryKun55/celosia](https://github.com/HenryKun55/celosia): the port this
+  fork builds on (pipeline, native renderer, hardware replacements, the first
+  Vita build).
 - [ran-j/PS2Recomp](https://github.com/ran-j/PS2Recomp) and its contributors:
-  the recompiler and runtime this port is built on.
-- [LightVelox/sotc-pc](https://github.com/LightVelox/sotc-pc), a Windows port of the PAL release on the
-  same base: its development notes pointed to several shared runtime bugs (DMA chain length, scheduler
-  unwinding).
-- Shadow of the Colossus © Sony Interactive Entertainment / Team Ico. This
-  project is not affiliated with or endorsed by them.
+  the recompiler and runtime.
+- [LightVelox/sotc-pc](https://github.com/LightVelox/sotc-pc): notes on shared
+  runtime bugs.
+- vitaGL, VitaSDK, vitacompanion, udcd_uvc and the Vita homebrew community.
+- Shadow of the Colossus © Sony Interactive Entertainment / Team Ico. Not
+  affiliated with or endorsed by them.
 
-## AI disclosure
-
-This port was developed with the help of an AI coding assistant. It assisted
-with reverse engineering, debugging and writing parts of the code. All work
-was directed, reviewed and tested by the author.
-
-## License
+This fork's work was done with an AI coding assistant, directed and tested on
+real hardware.
 
 GPL-3.0, the same license as PS2Recomp. See [LICENSE](LICENSE).
