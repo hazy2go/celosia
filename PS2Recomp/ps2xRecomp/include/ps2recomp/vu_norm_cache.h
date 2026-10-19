@@ -6,12 +6,12 @@
 namespace ps2recomp
 {
     // On by default (CELOSIA_VU_NORM_CSE=0 at recompile time: off). VU0 macro
-    // operations normalize
-    // every input (ps2VuNormalize, ~6 NEON instructions on the Vita), also
-    // inputs that a VU operation just produced, and a register read four
-    // times is normalized four times. This keeps each register's normalized
-    // value in a local (vnN, vacc) while it is known to match the context and
-    // gives the operations the _PRE macros that take normalized inputs.
+    // operations normalize every input (ps2VuNormalize, ~6 NEON instructions
+    // on the Vita), also inputs that a VU operation just produced, and a
+    // register read four times is normalized four times. This keeps each
+    // register's normalized value in a local (vnN, vacc) while it is known to
+    // match the context and gives the operations the _PRE macros that take
+    // normalized inputs.
     // Normalizing is idempotent and lane-wise, so the results are the same.
     // Valid within straight-line code only: labels, branches and calls (which
     // may change any VU0 register) forget everything.

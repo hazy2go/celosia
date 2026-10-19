@@ -169,6 +169,21 @@ namespace
         return true;
     }
 
+    // The last dispatched targets, for crash reports: on the Vita only with
+    // PS2X_DISPATCH_HISTORY (a ring buffer write at every guest call).
+    // A plain lazy flag: a guarded static is a barrier at every call on ARMv7.
+    int g_dispatchHistoryState = -1;
+    bool dispatchHistoryOn()
+    {
+#if defined(PLATFORM_VITA)
+        if (g_dispatchHistoryState < 0)
+            g_dispatchHistoryState = std::getenv("PS2X_DISPATCH_HISTORY") != nullptr ? 1 : 0;
+        return g_dispatchHistoryState != 0;
+#else
+        return true;
+#endif
+    }
+
     void pushDispatchPc(uint32_t pc)
     {
         DispatchHistory &h = g_dispatchHistory;
@@ -1457,7 +1472,8 @@ void PS2Runtime::dumpDispatchProfile()
 
 PS2Runtime::RecompiledFunction PS2Runtime::lookupFunction(uint32_t address)
 {
-    pushDispatchPc(address);
+    if (dispatchHistoryOn())
+        pushDispatchPc(address);
     if (auto &counts = dispatchProfile(); !counts.empty())
         ++counts[(address & (PS2_RAM_SIZE - 1u)) >> 2];
 
@@ -1712,9 +1728,16 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // Every inter-function transfer is also a deterministic EE safe point.
     // Backward edges inside generated functions use eeCheckpointDue(), while
     // this charge bounds straight-line call chains that have no local loop.
-    if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
+    // As at loop edges, the scheduler is asked every few calls with their
+    // cycles together (~30k guest calls a frame on the Vita, the check a
+    // call of its own each time).
+    static uint32_t callsSinceCheck = 0;
+    constexpr uint32_t kCallsPerCheck = 4u;
+    if (++callsSinceCheck >= kCallsPerCheck)
     {
-        return false;
+        callsSinceCheck = 0;
+        if (m_eeScheduler && m_eeScheduler->checkpointDue(kCallsPerCheck * EeScheduler::kGuestDispatchCycles))
+            return false;
     }
 
     ++ps2_stats::guestCalls;
@@ -1737,7 +1760,8 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         targetFn = g_ps2RecompiledFunctionTable[slot];
     if (targetFn != nullptr)
     {
-        pushDispatchPc(targetPc);
+        if (dispatchHistoryOn())
+            pushDispatchPc(targetPc);
         if (g_dispatchProfileState != 0)
             if (auto &counts = dispatchProfile(); !counts.empty())
                 ++counts[(targetPc & (PS2_RAM_SIZE - 1u)) >> 2];
@@ -1772,7 +1796,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
 
     // While unwinding to the scheduler, ctx->pc is where the deepest pending
     // call resumes; it can equal this callee's entry in recursive code.
-    if (isStopRequested() || ctx->pc == 0u || (m_eeScheduler && m_eeScheduler->unwinding()))
+    if (m_stopRequested.load(std::memory_order_relaxed) || ctx->pc == 0u || (m_eeScheduler && m_eeScheduler->unwinding()))
     {
         return false;
     }
