@@ -36,8 +36,17 @@ namespace ps2recomp
     // (register and float math, guest loads and stores: on the Vita those are
     // a compare and the access, and nothing their rare slow path does depends
     // on pc) leaves the pc store out.
-    bool translationObservesPc(const std::string &code)
+    bool translationObservesPc(const std::string &codeWithComments)
     {
+        // The disassembly comments ("lw $v0, 0x50($s0)") are not code.
+        std::string code;
+        for (size_t at = 0; at < codeWithComments.size();)
+        {
+            const size_t eol = std::min(codeWithComments.find('\n', at), codeWithComments.size());
+            const std::string line = codeWithComments.substr(at, eol - at);
+            code += line.substr(0, line.find("//")) + "\n";
+            at = eol + 1;
+        }
         for (const char *marker : {"runtime", "rdram", "ctx->pc", "Signal", "Exception", "throw", "return", "goto"})
             if (code.find(marker) != std::string::npos)
                 return true;

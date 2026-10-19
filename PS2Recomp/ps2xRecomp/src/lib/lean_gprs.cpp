@@ -133,7 +133,7 @@ namespace ps2recomp
             if (line.find("(rdram, ctx") != std::string::npos)
                 return true;
             for (size_t at = line.find("runtime->"); at != std::string::npos; at = line.find("runtime->", at + 1))
-                if (!startsAt(line, at, "runtime->eeCheckpointDue()"))
+                if (!startsAt(line, at, "runtime->eeCheckpointDue("))
                     return true;
             return false;
         }

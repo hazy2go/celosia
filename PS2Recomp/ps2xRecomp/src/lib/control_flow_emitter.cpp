@@ -186,7 +186,7 @@ namespace ps2recomp
         if (target <= sourcePc && !isCallLikeEdge())
         {
             m_ss << fmt::format("{}ctx->pc = 0x{:X}u;\n", indent, target);
-            m_ss << fmt::format("{}if (runtime->eeCheckpointDue()) {{\n", indent);
+            m_ss << fmt::format("{}if (PS2_LOOP_CHECKPOINT()) {{\n", indent);
             m_ss << fmt::format("{}    return;\n", indent);
             m_ss << fmt::format("{}}}\n", indent);
         }

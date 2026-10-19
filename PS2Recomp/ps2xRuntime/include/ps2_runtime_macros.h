@@ -795,16 +795,30 @@ static PS2_FORCE_INLINE void ps2FpuAlignOperands(float &a, float &b)
     std::memcpy(&b, &ub, sizeof(b));
 }
 
-static PS2_FORCE_INLINE float ps2FpuAdd(float a, float b)
+#if defined(__arm__) && !defined(__aarch64__)
+// 32-bit ARM (the Vita): the exact add, sub and mul are ~20 instructions
+// each with the value moved between the float and core registers: one
+// shared copy out of line keeps the generated code small (its size, not its
+// instruction count, is what the Vita's caches pay for).
+#define PS2_FPU_HELPER [[gnu::noinline]] inline
+#else
+#define PS2_FPU_HELPER static PS2_FORCE_INLINE
+#endif
+PS2_FPU_HELPER float ps2FpuAdd(float a, float b)
 {
     ps2FpuAlignOperands(a, b);
     return ps2FpuClamp(a + b);
 }
 
-static PS2_FORCE_INLINE float ps2FpuSub(float a, float b)
+PS2_FPU_HELPER float ps2FpuSub(float a, float b)
 {
     ps2FpuAlignOperands(a, b);
     return ps2FpuClamp(a - b);
+}
+
+PS2_FPU_HELPER float ps2FpuMul(float a, float b)
+{
+    return ps2FpuClamp(a * b);
 }
 
 static PS2_FORCE_INLINE float ps2SignedFloatMax(uint32_t signSource)
@@ -952,7 +966,7 @@ static PS2_FORCE_INLINE void ps2SetEeFloatingPointMode()
 #define FPU_SET_ACC(ctx, res) (ctx->f_acc = res)
 #define FPU_ADD_S(a, b) ps2FpuAdd((float)(a), (float)(b))
 #define FPU_SUB_S(a, b) ps2FpuSub((float)(a), (float)(b))
-#define FPU_MUL_S(a, b) ps2FpuClamp((float)(a) * (float)(b))
+#define FPU_MUL_S(a, b) ps2FpuMul((float)(a), (float)(b))
 #define FPU_DIV_S(a, b) ps2FpuClamp((float)(a) / (float)(b))
 #define FPU_SQRT_S(a) ps2FpuClamp(std::sqrt(std::fabs((float)(a))))
 #define FPU_ABS_S(a) fabsf((float)(a))

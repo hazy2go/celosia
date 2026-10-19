@@ -592,6 +592,19 @@ extern const uint32_t g_ps2RecompiledFunctionTableEnd;
 extern const uint32_t g_ps2RecompiledFunctionTableSlotCount;
 extern PS2Runtime::RecompiledFunction g_ps2RecompiledFunctionTable[];
 
+// A loop's back edge in generated code: the scheduler is asked every
+// kPs2LoopCheckEvery edges, with all of their cycles (a call into it at each
+// edge was ~65k a frame in the opening). An interrupt is seen a few
+// iterations later at most. Guest code runs on one thread.
+inline constexpr uint32_t kPs2LoopCheckEvery = 8u;
+inline uint32_t g_ps2LoopEdges = 0;
+[[gnu::noinline]] inline bool ps2LoopCheckpointDue(PS2Runtime *runtime)
+{
+    g_ps2LoopEdges = 0;
+    return runtime->eeCheckpointDue(32u * kPs2LoopCheckEvery);
+}
+#define PS2_LOOP_CHECKPOINT() (++g_ps2LoopEdges >= kPs2LoopCheckEvery && ps2LoopCheckpointDue(runtime))
+
 // Generated code going on at a guest address another recompiled function
 // holds, ctx->pc already set to it: through the function table, as the
 // dispatcher would run it (overrides registered there apply), but without a
