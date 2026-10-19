@@ -186,7 +186,9 @@ namespace ps2recomp
         ss << "\n";
         if (!resumeTargets.empty())
         {
-            ss << "    switch (ctx->pc) {\n";
+            // Entered at its start (a call, a transfer: ctx->pc is the start)
+            // without the resume search, a chain of compares on every entry.
+            ss << "    if (ctx->pc != 0x" << std::hex << function.start << std::dec << "u) switch (ctx->pc) {\n";
             for (uint32_t target : resumeTargets)
             {
                 ss << "        case 0x" << std::hex << target << "u: goto label_" << target << ";\n"
