@@ -34,7 +34,7 @@ scenes are far from playable speed yet.**
 | --- | --- | --- |
 | Menus and 2D screens | 30-33 fps | **~55 fps** |
 | Regular freezes (0.8-1 s every 5 s) | yes | **fixed** |
-| Opening cinematic | 2-5 fps | ~4.5 fps |
+| Opening cinematic | 2-5 fps | ~5 fps |
 
 ![Game logic per frame in the opening cinematic, per build](docs/vita/perf.svg)
 
@@ -49,7 +49,7 @@ stored around every operation, every instruction carries bookkeeping (the
 current pc, delay-slot state), every memory access runs checks, and control
 flow between functions goes through a scheduler. A fast desktop CPU hides
 this; the Vita's Cortex-A9 cannot. The same logic takes ~13 ms a frame on an
-Apple M4 and 170-240 ms on the Vita.
+Apple M4 and ~190 ms on the Vita.
 
 The PS2 runs this game at 30 fps on a 294 MHz CPU, and the Vita's CPU is not
 slower per clock. So a lean translation can get there; the current one is ~6x
@@ -94,11 +94,21 @@ unless noted.
 - **Direct transfers between split functions:** the recompiler's analysis
   splits routines into pieces, and every jump between pieces went back
   through the scheduler. They now run directly, through the function table so
-  overrides still apply: 42k -> 12k scheduler turns a frame, -15% game time.
+  overrides still apply: 42k -> 7k scheduler turns a frame, -15% game time.
+- No barriers left on the dispatcher's own path (guarded statics there were
+  one each).
+
+**Display lists in native mode**
+- The VIF1 chain the game still sends each frame (~4 MB, ~90k VIFcodes) is
+  walked with a prefetch ahead: it was a cache miss per VIFcode (33 -> 27 ms).
+- The GS event scan without integer divisions (the Cortex-A9 has none) and
+  skipping packets that cannot carry an event.
 
 Ruled out by measurement: the scheduler's exception-based thread switches
 (~1%), a fast non-exact FPU mode (no gain), trimming per-instruction pc stores
-alone (no gain).
+alone (no gain), guest registers in locals with a full write-back around
+every call (`CELOSIA_LEAN_GPRS`, opt-in: no gain yet), the scratchpad's slow
+path (~3.7k accesses a frame).
 
 ## Building
 

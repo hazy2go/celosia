@@ -12,6 +12,7 @@ BUILDS = [
     ("CPU fixes", 245),
     ("code size, VU0", 241),
     ("direct transfers", 207),
+    ("display-list walk", 193),
 ]
 TARGET_MS = 33.3
 
