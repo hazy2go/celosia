@@ -34,7 +34,7 @@ scenes are far from playable speed yet.**
 | --- | --- | --- |
 | Menus and 2D screens | 30-33 fps | **~55 fps** |
 | Regular freezes (0.8-1 s every 5 s) | yes | **fixed** |
-| Opening cinematic | 2-5 fps | ~5 fps |
+| Opening cinematic | 2-5 fps | ~6 fps |
 
 ![Game logic per frame in the opening cinematic, per build](docs/vita/perf.svg)
 
@@ -49,7 +49,7 @@ stored around every operation, every instruction carries bookkeeping (the
 current pc, delay-slot state), every memory access runs checks, and control
 flow between functions goes through a scheduler. A fast desktop CPU hides
 this; the Vita's Cortex-A9 cannot. The same logic takes ~13 ms a frame on an
-Apple M4 and ~190 ms on the Vita.
+Apple M4 and ~150 ms on the Vita.
 
 The PS2 runs this game at 30 fps on a 294 MHz CPU, and the Vita's CPU is not
 slower per clock. So a lean translation can get there; the current one is ~6x

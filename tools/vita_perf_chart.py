@@ -13,6 +13,8 @@ BUILDS = [
     ("code size, VU0", 241),
     ("direct transfers", 207),
     ("display-list walk", 193),
+    ("compact memory access", 163),
+    ("less bookkeeping", 153),
 ]
 TARGET_MS = 33.3
 
