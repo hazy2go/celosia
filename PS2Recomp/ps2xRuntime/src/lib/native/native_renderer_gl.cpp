@@ -27,6 +27,7 @@ std::recursive_mutex &ps2xVitaGlMutex();
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <array>
 #include <cstring>
 #include <iostream>
 #include <mutex>
@@ -389,6 +390,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
     struct Texture
     {
         GLuint name = 0;
+        GLint wrapS = 0, wrapT = 0; // as last set (0: not yet)
         uint64_t used = 0;
         uint64_t bytes = 0;
     };
@@ -503,6 +505,28 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 return 0;
             }
             return p;
+        }
+
+        // glUniform4fv on the main program, left out when the value is the
+        // one it already has (a program keeps its uniforms): most are the
+        // same from draw to draw.
+        std::unordered_map<GLint, std::array<float, 16>> mainUniformValues;
+        void mainUniform4(const char *name, GLsizei count, const float *values)
+        {
+            const GLint location = uniform(true, name);
+            if (location < 0 || count > 4)
+            {
+                glUniform4fv(location, count, values);
+                return;
+            }
+            const size_t bytes = static_cast<size_t>(count) * 4u * sizeof(float);
+            auto known = mainUniformValues.find(location);
+            if (known != mainUniformValues.end() && std::memcmp(known->second.data(), values, bytes) == 0)
+                return;
+            std::array<float, 16> &stored = known != mainUniformValues.end() ? known->second : mainUniformValues[location];
+            stored.fill(0.0f);
+            std::memcpy(stored.data(), values, bytes);
+            glUniform4fv(location, count, values);
         }
 
         GLint uniform(bool main, const char *name)
@@ -848,8 +872,18 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
     }
 
+    // SOTC_NATIVE_LOG_UPLOADS: where render's time goes, every 60 frames.
+    struct RenderSplit
+    {
+        bool on = std::getenv("SOTC_NATIVE_LOG_UPLOADS") != nullptr;
+        double passes = 0.0, present = 0.0;
+        uint32_t frames = 0;
+        static double now() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+    } g_renderSplit;
+
     void Renderer::render(uint32_t w, uint32_t h)
     {
+        const double renderStart = g_renderSplit.on ? RenderSplit::now() : 0.0;
         ensureTargets(w, h);
         if (!arena.empty())
         {
@@ -1023,21 +1057,21 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, r)));
                 glEnableVertexAttribArray(3);
                 glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(base + offsetof(native_renderer::Vertex, u)));
-                glUniform4fv(uniform(true, "uClip"), 4, d.clip);
-                glUniform4fv(uniform(true, "uDirections"), 4, d.state.light);
-                glUniform4fv(uniform(true, "uColours"), 4, d.state.light + 16);
+                mainUniform4("uClip", 4, d.clip);
+                mainUniform4("uDirections", 4, d.state.light);
+                mainUniform4("uColours", 4, d.state.light + 16);
                 if (d.state.shadowVolume)
                 {
                     if (backgroundOnly)
                         continue;
                     // The count where the faces pass the depth test: front +1, back -1.
                     const float misc[4] = {0, 1, 0, 0}, none[4] = {0, 0, 0, 0};
-                    glUniform4fv(uniform(true, "uMisc"), 1, misc);
-                    glUniform4fv(uniform(true, "uFogB"), 1, none);
-                    glUniform4fv(uniform(true, "uFogC"), 1, none);
-                    glUniform4fv(uniform(true, "uFogA"), 1, none);
-                    glUniform4fv(uniform(true, "uFogColour"), 1, none);
-                    glUniform4fv(uniform(true, "uDebug"), 1, none);
+                    mainUniform4("uMisc", 1, misc);
+                    mainUniform4("uFogB", 1, none);
+                    mainUniform4("uFogC", 1, none);
+                    mainUniform4("uFogA", 1, none);
+                    mainUniform4("uFogColour", 1, none);
+                    mainUniform4("uDebug", 1, none);
                     glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
 #if defined(PS2X_NATIVE_VITA)
                     // vitaGL bakes the colour mask into the fragment program's
@@ -1102,8 +1136,11 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                 {
                     tex->second.used = arenaFrame;
                     bindTexture(0, tex->second.name);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (d.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (d.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+                    const GLint wrapS = (d.state.clamp & 1u) ? GL_CLAMP_TO_EDGE : GL_REPEAT, wrapT = (d.state.clamp & 2u) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+                    if (tex->second.wrapS != wrapS)
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, tex->second.wrapS = wrapS);
+                    if (tex->second.wrapT != wrapT)
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, tex->second.wrapT = wrapT);
                 }
                 const float misc[4] = {d.state.lit ? 1.0f : 0.0f, d.state.opacity, d.state.uvOffset[0], d.state.uvOffset[1]};
                 const bool vertexFog = fog.vertexFog && !d.state.screen && (!d.state.background || bgFog);
@@ -1126,12 +1163,12 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
                         debug[k] = d.state.reflectionTint[k];
                     debug[3] = -d.state.reflectionTint[3];
                 }
-                glUniform4fv(uniform(true, "uMisc"), 1, misc);
-                glUniform4fv(uniform(true, "uFogA"), 1, fogA);
-                glUniform4fv(uniform(true, "uFogB"), 1, fogB);
-                glUniform4fv(uniform(true, "uFogC"), 1, fogC);
-                glUniform4fv(uniform(true, "uFogColour"), 1, fogColour);
-                glUniform4fv(uniform(true, "uDebug"), 1, debug);
+                mainUniform4("uMisc", 1, misc);
+                mainUniform4("uFogA", 1, fogA);
+                mainUniform4("uFogB", 1, fogB);
+                mainUniform4("uFogC", 1, fogC);
+                mainUniform4("uFogColour", 1, fogColour);
+                mainUniform4("uDebug", 1, debug);
                 drawMesh();
             }
             resolveShadows();
@@ -1412,7 +1449,19 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             }
 #endif
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            const double presentStart = g_renderSplit.on ? RenderSplit::now() : 0.0;
             hook(shownFrame[shownIndex].texture, w, h);
+            if (g_renderSplit.on)
+            {
+                const double end = RenderSplit::now();
+                g_renderSplit.passes += presentStart - renderStart;
+                g_renderSplit.present += end - presentStart;
+                if (++g_renderSplit.frames == 60u)
+                {
+                    std::fprintf(stderr, "[glsplit] ms per frame: passes %.1f present %.1f\n", g_renderSplit.passes / 60.0, g_renderSplit.present / 60.0);
+                    g_renderSplit = RenderSplit{};
+                }
+            }
             return;
         }
         // Read back, top row first (the GL picture is y-up).
@@ -1509,6 +1558,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+            t.wrapS = t.wrapT = GL_REPEAT;
         }
         void beginFrame() override
         {

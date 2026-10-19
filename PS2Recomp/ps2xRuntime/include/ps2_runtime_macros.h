@@ -1181,10 +1181,60 @@ static PS2_FORCE_INLINE void Ps2StoreGpr64(R5900Context *ctx, int reg, uint64_t 
 {
     std::memcpy(&ctx->r[reg], &v, sizeof(v));
 }
+// CELOSIA_LEAN_GPRS: a guest register in a function's locals as its low and
+// high 32 bits (the low 64 bits of the context's register).
+// One word at a time: through a two-word array GCC staged every register on
+// the stack.
+static PS2_FORCE_INLINE void Ps2LeanLoad(const R5900Context *ctx, int reg, uint32_t &lo, uint32_t &hi)
+{
+    const char *at = reinterpret_cast<const char *>(&ctx->r[reg]);
+    std::memcpy(&lo, at, sizeof(lo));
+    std::memcpy(&hi, at + 4, sizeof(hi));
+}
+static PS2_FORCE_INLINE void Ps2LeanStore(R5900Context *ctx, int reg, uint32_t lo, uint32_t hi)
+{
+    char *at = reinterpret_cast<char *>(&ctx->r[reg]);
+    std::memcpy(at, &lo, sizeof(lo));
+    std::memcpy(at + 4, &hi, sizeof(hi));
+}
+static PS2_FORCE_INLINE uint64_t Ps2LeanJoin(uint32_t lo, uint32_t hi)
+{
+    return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+// Written through: the local and the context together, so calls and returns
+// need no write-back (reads come from the locals).
+template <typename T>
+static PS2_FORCE_INLINE void Ps2LeanSetS32(R5900Context *ctx, int reg, uint32_t &lo, uint32_t &hi, T value)
+{
+    lo = static_cast<uint32_t>(value);
+    hi = static_cast<uint32_t>(static_cast<int32_t>(lo) >> 31);
+    Ps2LeanStore(ctx, reg, lo, hi);
+}
+template <typename T>
+static PS2_FORCE_INLINE void Ps2LeanSetZ32(R5900Context *ctx, int reg, uint32_t &lo, uint32_t &hi, T value)
+{
+    lo = static_cast<uint32_t>(value);
+    hi = 0u;
+    Ps2LeanStore(ctx, reg, lo, hi);
+}
+template <typename T>
+static PS2_FORCE_INLINE void Ps2LeanSet64(R5900Context *ctx, int reg, uint32_t &lo, uint32_t &hi, T value)
+{
+    const uint64_t v = static_cast<uint64_t>(value);
+    lo = static_cast<uint32_t>(v);
+    hi = static_cast<uint32_t>(v >> 32);
+    Ps2LeanStore(ctx, reg, lo, hi);
+}
 // CELOSIA_COUNT_INSTRS=1 at recompile time: every guest instruction counts
 // here (measuring how much MIPS code a frame runs; one thread).
 inline uint64_t g_ps2GuestInstructions = 0;
 #define PS2_COUNT_INSTRUCTIONS(n) (g_ps2GuestInstructions += (n))
+// Measurement builds (generated with CELOSIA_COUNT_OPS): executed instructions
+// by mnemonic and by function (ids in the recompiler's count_ids.txt), dumped
+// by PS2X_COUNT_DUMP=<file>.
+inline uint64_t g_ps2OpCounts[1024] = {};
+inline uint64_t g_ps2FunctionCounts[65536] = {};
+#define PS2_COUNT_OP(op, fn) (++g_ps2OpCounts[(op) & 1023u], ++g_ps2FunctionCounts[(fn) & 65535u])
 #define PS2_SX32(v) static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(v)))
 #define PS2_ZX32(v) static_cast<uint64_t>(static_cast<uint32_t>(v))
 

@@ -2975,6 +2975,33 @@ void PS2Runtime::run()
 
     std::atomic<bool> gameThreadFinished{false};
 
+    // PS2X_COUNT_DUMP=<file> (builds generated with CELOSIA_COUNT_OPS): every
+    // 10 s, "frames <n>" (game frames so far) and the executed instruction
+    // counts, "op <id> <n>" and "fn <id> <n>".
+    if (const char *countPath = std::getenv("PS2X_COUNT_DUMP"))
+    {
+        std::thread([path = std::string(countPath)]()
+                    {
+            for (;;)
+            {
+                std::this_thread::sleep_for(std::chrono::seconds(10));
+                const std::string tmp = path + ".tmp";
+                if (FILE *f = std::fopen(tmp.c_str(), "w"))
+                {
+                    std::fprintf(f, "frames %llu\n", static_cast<unsigned long long>(ps2_stats::vif1Chains.load()));
+                    for (uint32_t i = 0; i < 1024u; ++i)
+                        if (g_ps2OpCounts[i])
+                            std::fprintf(f, "op %u %llu\n", i, static_cast<unsigned long long>(g_ps2OpCounts[i]));
+                    for (uint32_t i = 0; i < 65536u; ++i)
+                        if (g_ps2FunctionCounts[i])
+                            std::fprintf(f, "fn %u %llu\n", i, static_cast<unsigned long long>(g_ps2FunctionCounts[i]));
+                    std::fclose(f);
+                    std::rename(tmp.c_str(), path.c_str());
+                }
+            } })
+            .detach();
+    }
+
     // PS2X_PROFILE=<file>: a sampling profiler of the guest code. 1000 times a
     // second it reads the running EE context's pc and ra (null: the EE waits)
     // and every 5 s rewrites <file> with "pc ra samples" lines and an "idle"

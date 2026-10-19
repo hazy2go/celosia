@@ -273,6 +273,17 @@ bool PS2Memory::onVu1Worker()
     return t_onVu1Worker;
 }
 
+// GS CSR without waiting for the VU1 worker: reads return the register as it
+// is, writes are queued behind the worker's work (so they land in the same
+// order). The game's FINISH handler reads and writes CSR right after kicking
+// a frame, which made the game wait for the worker's whole frame (~7 ms a
+// frame on the Vita, the worker otherwise ~5% busy). PS2X_CSR_SYNC=1: wait.
+static bool csrNoSync(bool mtvu)
+{
+    static const bool sync = std::getenv("PS2X_CSR_SYNC") != nullptr;
+    return !sync && mtvu;
+}
+
 // Each job holds a copy of its DMA data: when the VU1 worker falls behind
 // (the Vita in a heavy scene: vu1 100%), the queue grew by tens of MB in
 // seconds and ran the heap out. Past the high mark the caller waits for it.
@@ -1008,8 +1019,10 @@ uint64_t PS2Memory::read64(uint32_t address)
     {
         ps2_stats::TimeInto timed{ps2_stats::gsPrivReadUs};
         ps2_stats::gsPrivReads.fetch_add(1, std::memory_order_relaxed);
-        syncVu1();
         const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+        if (regOff == kGsCsrRegOffset && csrNoSync(m_mtvuEnabled))
+            return gs_regs.csr.load();
+        syncVu1();
         if (regOff == kGsCsrRegOffset)
         {
             return gs_regs.csr.load();
@@ -1231,8 +1244,13 @@ void PS2Memory::write64(uint32_t address, uint64_t value)
 
     if (isGsPrivReg(address))
     {
-        syncVu1();
         const uint32_t regOff = (address - PS2_GS_PRIV_REG_BASE) & ~0x7u;
+        if (regOff == kGsCsrRegOffset && csrNoSync(m_mtvuEnabled))
+        {
+            runInVu1Order([this, value] { writeCsrFull(gs_regs.csr, value); });
+            return;
+        }
+        syncVu1();
         if (regOff == kGsCsrRegOffset)
         {
             // CSR: bits 0..1 are write-one-to-clear status bits. Done as a single

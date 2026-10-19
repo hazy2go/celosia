@@ -86,10 +86,13 @@ namespace ps2recomp
                         const int reg = registerAt(s, regAt, regEnd);
                         if (reg <= 0 || !cached[reg])
                             break;
-                        const std::string name = "gr" + std::to_string(reg);
+                        // Each register as two 32-bit locals, grNl and grNh: a
+                        // 64-bit local takes a register pair on 32-bit ARM, and
+                        // with a dozen of them GCC kept them on the stack.
+                        const std::string lo = "gr" + std::to_string(reg) + "l", hi = "gr" + std::to_string(reg) + "h";
                         if (a.write)
                         {
-                            // SET_GPR_x(ctx, N, value) -> grN = convert(value)
+                            // SET_GPR_x(ctx, N, value) -> Ps2LeanSetx(grNl, grNh, value)
                             if (s.compare(regEnd, 2, ", ") != 0)
                                 break;
                             const size_t valueAt = regEnd + 2;
@@ -98,8 +101,8 @@ namespace ps2recomp
                                 break;
                             const std::string value = rewriteAccesses(s.substr(valueAt, close - valueAt), cached);
                             const std::string prefix(a.prefix);
-                            const char *convert = prefix.find("ZE32") != std::string::npos ? "PS2_ZX32" : prefix.find("32") != std::string::npos ? "PS2_SX32" : "static_cast<uint64_t>";
-                            out += name + " = " + convert + "(" + value + ")";
+                            const char *set = prefix.find("ZE32") != std::string::npos ? "Ps2LeanSetZ32" : prefix.find("32") != std::string::npos ? "Ps2LeanSetS32" : "Ps2LeanSet64";
+                            out += std::string(set) + "(ctx, " + std::to_string(reg) + ", " + lo + ", " + hi + ", " + value + ")";
                             i = close + 1;
                         }
                         else
@@ -108,13 +111,13 @@ namespace ps2recomp
                                 break;
                             const std::string prefix(a.prefix);
                             if (prefix.rfind("GPR_U64", 0) == 0)
-                                out += name;
+                                out += "Ps2LeanJoin(" + lo + ", " + hi + ")";
                             else if (prefix.rfind("GPR_S64", 0) == 0)
-                                out += "static_cast<int64_t>(" + name + ")";
+                                out += "static_cast<int64_t>(Ps2LeanJoin(" + lo + ", " + hi + "))";
                             else if (prefix.rfind("GPR_S32", 0) == 0)
-                                out += "static_cast<int32_t>(" + name + ")";
+                                out += "static_cast<int32_t>(" + lo + ")";
                             else
-                                out += "static_cast<uint32_t>(" + name + ")";
+                                out += lo;
                             i = regEnd + 1;
                         }
                         done = true;
@@ -191,18 +194,24 @@ namespace ps2recomp
         if (!any)
             return function;
 
+        // After a call only the registers a callee may change are read again:
+        // the MIPS ABI keeps s0-s7, gp, sp and fp (compiled game code keeps
+        // to it). A call that unwinds to the scheduler returns from here at
+        // once, and the function comes back through its entry, which loads
+        // every register.
+        const auto calleeSaved = [](int r) { return (r >= 16 && r <= 23) || r == 28 || r == 29 || r == 30; };
         std::string writeback, reload, declare;
         for (int r = 1; r < kRegs; ++r)
         {
             if (!cached[r])
                 continue;
-            const std::string n = std::to_string(r);
-            if (written[r])
-                writeback += "Ps2StoreGpr64(ctx, " + n + ", gr" + n + "); ";
-            reload += "gr" + n + " = Ps2LoadGpr64(ctx, " + n + "); ";
-            declare += std::string(declare.empty() ? "    uint64_t " : ", ") + "gr" + n + " = Ps2LoadGpr64(ctx, " + n + ")";
+            const std::string n = std::to_string(r), lo = "gr" + n + "l", hi = "gr" + n + "h";
+            // Written through (Ps2LeanSet*): the context always has the
+            // registers' values, nothing to write back.
+            if (!calleeSaved(r))
+                reload += "Ps2LeanLoad(ctx, " + n + ", " + lo + ", " + hi + "); ";
+            declare += "    uint32_t " + lo + ", " + hi + ";\n    Ps2LeanLoad(ctx, " + n + ", " + lo + ", " + hi + ");\n";
         }
-        declare += ";\n";
         const std::string writebackBlock = writeback.empty() ? std::string() : "{ " + writeback + "}";
         const std::string reloadBlock = "{ " + reload + "}";
         auto returnWithWriteback = [&](std::string line)

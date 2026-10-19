@@ -8,8 +8,11 @@
 #include "ps2recomp/types.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cctype>
+#include <map>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
@@ -18,6 +21,44 @@ namespace ps2recomp
 {
     namespace
     {
+        // CELOSIA_COUNT_OPS (measurement builds): every executed instruction
+        // counted by mnemonic and by function. The numbers are given out here
+        // (generation runs on several threads) and written to count_ids.txt
+        // ("op <id> <mnemonic>", "fn <id> <name>") in the working directory.
+        struct CountIds
+        {
+            std::mutex mutex;
+            std::map<std::string, uint32_t> ops, functions;
+            uint32_t id(std::map<std::string, uint32_t> &table, const char *kind, const std::string &name)
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                auto it = table.find(name);
+                if (it != table.end())
+                    return it->second;
+                const uint32_t next = static_cast<uint32_t>(table.size());
+                table.emplace(name, next);
+                if (FILE *f = std::fopen("count_ids.txt", "a"))
+                {
+                    std::fprintf(f, "%s %u %s\n", kind, next, name.c_str());
+                    std::fclose(f);
+                }
+                return next;
+            }
+        };
+        CountIds &countIds()
+        {
+            static CountIds ids;
+            return ids;
+        }
+        std::string countOp(const Instruction &inst, uint32_t function)
+        {
+            std::string mnemonic = R5900Decoder::disassembleInstruction(inst);
+            mnemonic = mnemonic.substr(0, mnemonic.find_first_of(" \t"));
+            if (mnemonic.empty())
+                mnemonic = "?";
+            return "    PS2_COUNT_OP(" + std::to_string(countIds().id(countIds().ops, "op", mnemonic)) + "u, " + std::to_string(function) + "u);\n";
+        }
+
         Instruction makeSyntheticDelaySlot(uint32_t address)
         {
             Instruction inst{};
@@ -102,6 +143,8 @@ namespace ps2recomp
         }
 
         static const bool countInstructions = std::getenv("CELOSIA_COUNT_INSTRS") != nullptr;
+        static const bool countOps = std::getenv("CELOSIA_COUNT_OPS") != nullptr;
+        const uint32_t countFunction = countOps ? countIds().id(countIds().functions, "fn", function.name) : 0u;
         CodeGenerator::AnalysisResult analysisResult = cg.collectInternalBranchTargets(function, instructions);
         std::vector<uint32_t> resumeTargets(analysisResult.resumeEntryPoints.begin(),
                                             analysisResult.resumeEntryPoints.end());
@@ -214,6 +257,8 @@ namespace ps2recomp
                     {
                         if (countInstructions)
                             ss << "    PS2_COUNT_INSTRUCTIONS(2);\n"; // the branch and its delay slot
+                        if (countOps)
+                            ss << countOp(inst, countFunction) << countOp(*delaySlot, countFunction);
                         ss << cg.handleBranchDelaySlots(inst, *delaySlot, function, analysisResult);
                     }
 
@@ -249,6 +294,8 @@ namespace ps2recomp
 
                     if (countInstructions)
                         ss << "    PS2_COUNT_INSTRUCTIONS(1);\n";
+                    if (countOps)
+                        ss << countOp(inst, countFunction);
                     const MemoryAccessHint memoryHint = resolveMemoryAccessHint(inst, constantRegisters);
                     const std::string translated = cg.translateInstruction(inst, memoryHint);
                     if (translationObservesPc(translated))
