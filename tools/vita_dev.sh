@@ -82,11 +82,12 @@ env)
     ;;
 run) run "${2:-90}"; stats ;;
 bench)
-    # New Game, skip the intro, walk (tools/gameplay_fps.sh), on the guest clock.
+    # New Game, skip the intro, then from the altar right and back through the
+    # hall out to the field, on the guest clock.
     # Timed in guest VBlanks (60 a second), so slow loads on the Vita keep step.
     IN="2100v:START:18v;2700v:START:18v"
     for t in $(seq 56 2 90); do IN="$IN;$((t * 60))v:CROSS:18v"; done
-    IN="$IN;6600v:START:18v;7500v:LS_UP:1200v"
+    IN="$IN;6600v:START:18v;9000v:CROSS:18v;9600v:CROSS:18v;10500v:LS_RIGHT:300v;10800v:LS_DOWN:9000v"
     envfile=$OUT/bench-env.txt
     { echo "PS2X_INPUT_SCRIPT=$IN"; [ -f "$OUT/extra-env.txt" ] && cat "$OUT/extra-env.txt"; } >"$envfile"
     put "$envfile" "ux0:/data/celosia/env.txt"

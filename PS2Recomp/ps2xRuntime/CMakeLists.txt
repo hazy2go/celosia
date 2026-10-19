@@ -677,9 +677,10 @@ if(PS2X_IS_VITA)
         endif()
     endforeach()
     target_compile_options(ps2_runtime PRIVATE -O2)
-    # CELOSIA_VITA_GAME_OPT: the recompiled game's optimisation (-Os by
-    # default; -O2 measured against it on the device).
-    set(CELOSIA_VITA_GAME_OPT "-Os" CACHE STRING "Optimisation flag for the recompiled game code on the Vita")
+    # CELOSIA_VITA_GAME_OPT: the recompiled game's optimisation. -O2: the
+    # opening ~4% faster on the Vita than -Os though its code is 14% larger
+    # (the A9 waits less on its instruction cache than on the work itself).
+    set(CELOSIA_VITA_GAME_OPT "-O2" CACHE STRING "Optimisation flag for the recompiled game code on the Vita")
     target_compile_options(ps2EntryRunner PRIVATE ${CELOSIA_VITA_GAME_OPT})
     # Except the hot few: recompiled VU1 microcode and native replacements
     # (game overrides) run every vertex.
