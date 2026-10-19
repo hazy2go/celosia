@@ -1,4 +1,5 @@
 #include "ps2_iop_host.h"
+#include "runtime/ps2_counters.h"
 #include "runtime/ps2_stats.h"
 
 #include "ps2_runtime.h"

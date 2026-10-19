@@ -3,6 +3,7 @@
 // the GL path against Metal); the Vita: OpenGL (vitaGL); elsewhere none.
 #include "native_backend.h"
 #include "runtime/native_tuning.h"
+#include "runtime/ps2_counters.h"
 #include "runtime/ps2_stats.h"
 #include "ps2_runtime_macros.h"
 
@@ -557,6 +558,11 @@ namespace native_renderer
                          ps2_stats::modelDispCalls.exchange(0) / 60.0, ps2_stats::dlKickUs.exchange(0) / 60000.0,
                          ps2_stats::discReadUs.exchange(0) / 60000.0, ps2_stats::discReads.exchange(0) / 60.0,
                          ps2_stats::discReadBytes.exchange(0) / 60.0 / 1024.0);
+            std::fprintf(stderr, "[nativemodel] ms per frame: palettes %.1f skinning %.1f packet parsing %.1f | skinned vertices posed %.0f, out %.0f\n",
+                         ps2_stats::nmPaletteUs.exchange(0) / 60000.0, ps2_stats::nmSkinUs.exchange(0) / 60000.0, ps2_stats::nmParseUs.exchange(0) / 60000.0,
+                         ps2_stats::skinPosed / 60.0, ps2_stats::skinOutput / 60.0);
+            std::fprintf(stderr, "[nativemodel] skinned draws %.0f a frame\n", ps2_stats::skinDraws / 60.0);
+            ps2_stats::skinPosed = ps2_stats::skinOutput = ps2_stats::skinDraws = 0;
             std::fprintf(stderr, "[framewait] ms per frame: vu1 sync %.1f (%.1f waits) gs priv reads %.1f (%.1f reads) | guest calls %.0f checkpoints %.0f\n",
                          ps2_stats::vu1SyncWaitUs.exchange(0) / 60000.0, ps2_stats::vu1SyncWaits.exchange(0) / 60.0, ps2_stats::gsPrivReadUs.exchange(0) / 60000.0,
                          ps2_stats::gsPrivReads.exchange(0) / 60.0, ps2_stats::guestCalls / 60.0, ps2_stats::guestCheckpoints / 60.0);

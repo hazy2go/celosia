@@ -3,6 +3,7 @@
 
 #include "ps2_log.h"
 #include "ps2_runtime_macros.h"
+#include "runtime/ps2_counters.h"
 #include "runtime/ps2_stats.h"
 #include "runtime/ps2_thread_load.h"
 
@@ -217,9 +218,8 @@ void EeScheduler::run()
             {
                 completion(running->activeContext());
             }
-            catch (const EeDispatcherTransfer &transfer)
+            catch (const EeDispatcherTransfer &)
             {
-                ps2_stats::transferCaught(transfer.thrownUs);
             }
             if (m_currentThreadId == 0)
             {
@@ -256,9 +256,8 @@ void EeScheduler::run()
                     {
                         completed.onComplete(completed.context, running->activeContext());
                     }
-                    catch (const EeDispatcherTransfer &transfer)
+                    catch (const EeDispatcherTransfer &)
                     {
-                        ps2_stats::transferCaught(transfer.thrownUs);
                     }
                 }
                 continue;
@@ -393,9 +392,8 @@ void EeScheduler::run()
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
         }
-        catch (const EeDispatcherTransfer &transfer)
+        catch (const EeDispatcherTransfer &)
         {
-            ps2_stats::transferCaught(transfer.thrownUs);
             m_guestExecuting.store(false, std::memory_order_release);
             m_insideInterrupt = false;
         }

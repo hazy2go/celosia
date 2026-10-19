@@ -1,6 +1,7 @@
 #include "ThreadNaming.h"
 #include "runtime/ps2_thread_load.h"
 #include "ps2_runtime_macros.h"
+#include "runtime/ps2_counters.h"
 #include "runtime/ps2_stats.h"
 #include <unordered_set>
 #include <cstdlib>

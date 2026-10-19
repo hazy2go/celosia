@@ -4,6 +4,7 @@
 #include <cstring>
 #include <functional>
 
+#include "runtime/ps2_counters.h"
 #include "runtime/ps2_stats.h"
 
 // GIF data when the GS rasterizes nothing (GS::skipRaster): of a packet only

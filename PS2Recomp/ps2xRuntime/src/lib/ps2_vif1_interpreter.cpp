@@ -1,6 +1,7 @@
 #include "ps2_vif1_compact.h"
 #include "runtime/gs/gs_frontend.h"
 #include <cstdio>
+#include "runtime/ps2_counters.h"
 #include "runtime/ps2_stats.h"
 // Based on Blackline Interactive implementation
 #include "runtime/ps2_memory.h"

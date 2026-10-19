@@ -4,6 +4,7 @@
 #include "runtime/gs/gs_hw_backend.h"
 #include <set>
 #include <map>
+#include "runtime/ps2_counters.h"
 #include "runtime/ps2_stats.h"
 #include "runtime/ps2_vu1_native.h"
 #include "ps2_runtime.h"
@@ -3194,9 +3195,7 @@ void PS2Runtime::run()
 #endif
             if (!verboseStats)
             {
-                std::fprintf(stderr, "[stats] t=%d gameFps=%.1f eeTransfers/s=%.1f\n", static_cast<int>(GetTime()), (statChains - lastStatChains) / 5.0,
-                             ps2_stats::eeTransfers.exchange(0) / 5.0);
-                ps2_stats::eeTransferUs.store(0, std::memory_order_relaxed);
+                std::fprintf(stderr, "[stats] t=%d gameFps=%.1f\n", static_cast<int>(GetTime()), (statChains - lastStatChains) / 5.0);
                 lastStatChains = statChains;
                 lastHostFrames = hostFrames;
             }
@@ -3262,8 +3261,6 @@ void PS2Runtime::run()
                               last = now;
                               return " clock=" + std::to_string(speed).substr(0, 5) + "x";
                           }()
-                          << " eeTransfers/s=" << ps2_stats::eeTransfers.exchange(0) / 5.0
-                          << " unwindMs/s=" << ps2_stats::eeTransferUs.exchange(0) / 5000.0
                           << " holds(1/2/3/4+)=" << ps2_stats::frameHolds[0].exchange(0) << "/" << ps2_stats::frameHolds[1].exchange(0)
                           << "/" << ps2_stats::frameHolds[2].exchange(0) << "/" << ps2_stats::frameHolds[3].exchange(0)
                           << " mscal=" << ps2_stats::vu1Mscal.exchange(0)

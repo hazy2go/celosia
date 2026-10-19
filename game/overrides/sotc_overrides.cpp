@@ -10,6 +10,7 @@
 #include "game_overrides.h"
 #include "runtime/ee_scheduler.h"
 #include "ps2x/iop/iop_subsystem.h"
+#include "runtime/ps2_counters.h"
 #include "runtime/ps2_stats.h"
 
 #include <array>

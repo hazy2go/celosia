@@ -81,7 +81,7 @@ cmd_configure() {
     mkdir -p "$RUNNER_DIR" "$VU1REC_DIR" "$LOGS"
     # shellcheck disable=SC2086
     cmake -S "$ROOT/PS2Recomp" -B "$CMAKE_DIR" -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_BUILD_TYPE=Release $(compiler_cache_args) \
         -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_ANALYZER=OFF \
         -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF \
         "-DPS2X_RUNNER_DIRS=$RUNNER_DIR;$VU1REC_DIR;$ROOT/game/overrides" \
@@ -97,6 +97,14 @@ build_target() {
 }
 
 # Recompiles a stage directory (config.toml + functions.csv) into the runner.
+# ccache, when installed: a file compiled before with the same content and
+# flags comes out of the cache (switching between variants, regenerations
+# that change only some functions).
+compiler_cache_args() {
+    command -v ccache >/dev/null 2>&1 &&
+        echo "-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+}
+
 recompile() {
     local dir=$1
     build_target ps2_recomp
@@ -104,8 +112,10 @@ recompile() {
     rm -rf "$dir/output"
     (cd "$dir" && "$RECOMP" config.toml >recomp.log 2>&1) ||
         { tail -20 "$dir/recomp.log"; die "recompiler failed (log: $dir/recomp.log)"; }
-    find "$RUNNER_DIR" -maxdepth 1 -type f \( -name '*.cpp' -o -name '*.h' \) -delete
-    find "$dir/output" -maxdepth 1 -type f \( -name '*.cpp' -o -name '*.h' \) -exec sh -c 'cp "$@" "$0"' "$RUNNER_DIR" {} +
+    # Only the files whose content changed are replaced (by checksum): the
+    # rest keep their time, so a regeneration rebuilds what it changed.
+    mkdir -p "$RUNNER_DIR"
+    rsync -a --checksum --delete --include='*.cpp' --include='*.h' --exclude='*' "$dir/output/" "$RUNNER_DIR/"
     # New/removed files change the source glob.
     cmake "$CMAKE_DIR" >"$LOGS/configure.log" 2>&1
     build_target ps2EntryRunner
@@ -282,12 +292,12 @@ cmd_vita() {
         echo "$vglStamp" >"$vgl/.celosia-stamp"
     fi
     say "configuring the Vita build in $dir"
-    cmake -S "$ROOT/PS2Recomp" -B "$dir" -G Ninja \
+    cmake -S "$ROOT/PS2Recomp" -B "$dir" -G Ninja $(compiler_cache_args) \
         -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
         -DCMAKE_BUILD_TYPE=Release \
         -DPS2X_BUILD_RECOMP=OFF -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF -DPS2X_BUILD_ANALYZER=OFF \
         -DPS2X_ENABLE_AGRESSIVE_LOGS=OFF -DPS2X_ENABLE_FFMPEG=OFF -DPS2X_ENABLE_DEBUG_UI=OFF \
-        -DPS2X_ENABLE_RUNNER_PCH=OFF \
+        -DPS2X_ENABLE_RUNNER_PCH=ON \
         "-DPS2X_RUNNER_DIRS=$RUNNER_DIR;$VU1REC_DIR;$ROOT/game/overrides" \
         "-DPS2X_VITA_APP_NAME=Shadow of the Colossus" -DPS2X_VITA_TITLEID=CELO00001 \
         -DPS2X_DEFAULT_BOOT_ELF=ux0:data/celosia/disc/$BOOT \
