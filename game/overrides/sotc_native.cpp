@@ -40,9 +40,14 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <set>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -678,6 +683,144 @@ namespace sotc_native
             indexed = std::find(faceNormal.begin(), faceNormal.end(), 1u) == faceNormal.end();
         }
     };
+    // A skinned packet's vertices posed by the bone palette (camera space):
+    // positions and normals written over out[0, count), which holds the
+    // packet's texture coordinates and colours.
+    void poseSkinned(const SkinnedPacket &packet, const float *pal, native_renderer::Vertex *out, size_t count)
+    {
+    for (size_t i = 0; i < count; ++i)
+    {
+        const SkinnedPacket::Bind &v = packet.bind[i];
+        native_renderer::Vertex &o = out[i];
+#if defined(__ARM_NEON)
+        // Each bone's matrix columns times (x, y, z, 1): 4 vector
+        // multiply-adds for the position, 3 for the normal.
+        float32x4_t position = vdupq_n_f32(0.0f), normal = vdupq_n_f32(0.0f);
+        for (uint32_t b = 0; b < v.bones; ++b)
+        {
+            const float *m = pal + v.matrix[b];
+            const float32x4_t c0 = vld1q_f32(m), c1 = vld1q_f32(m + 4), c2 = vld1q_f32(m + 8), c3 = vld1q_f32(m + 12);
+            const float32x4_t p = vmlaq_n_f32(vmlaq_n_f32(vmlaq_n_f32(c3, c0, v.x), c1, v.y), c2, v.z);
+            const float32x4_t n = vmlaq_n_f32(vmlaq_n_f32(vmulq_n_f32(c0, v.nx), c1, v.ny), c2, v.nz);
+            position = vmlaq_n_f32(position, p, v.weight[b]);
+            normal = vmlaq_n_f32(normal, n, v.weight[b]);
+        }
+        // Stored from the NEON registers (a lane moved to an ARM
+        // register stalls the A9): x y z and a lane over nx, then
+        // nx ny nz.
+        vst1q_f32(&o.x, position);
+        vst1_f32(&o.nx, vget_low_f32(normal));
+        vst1q_lane_f32(&o.nz, normal, 2);
+#else
+        o.x = o.y = o.z = o.nx = o.ny = o.nz = 0.0f;
+        for (uint32_t b = 0; b < v.bones; ++b)
+        {
+            const float *m = pal + v.matrix[b];
+            const float w = v.weight[b];
+            o.x += w * (m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12]);
+            o.y += w * (m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13]);
+            o.z += w * (m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14]);
+            o.nx += w * (m[0] * v.nx + m[4] * v.ny + m[8] * v.nz);
+            o.ny += w * (m[1] * v.nx + m[5] * v.ny + m[9] * v.nz);
+            o.nz += w * (m[2] * v.nx + m[6] * v.ny + m[10] * v.nz);
+        }
+#endif
+    }
+    }
+
+    // Posing on a thread of its own (the indexed packets: no face normals
+    // computed from posed corners). modelDisp queues a packet with its
+    // instance's palette and goes on; the frame's end waits for the jobs and
+    // uploads them in order. SOTC_SKIN_SYNC=1: posed in modelDisp.
+    bool skinSync()
+    {
+        static const bool sync = std::getenv("SOTC_SKIN_SYNC") != nullptr;
+        return sync;
+    }
+    struct SkinJob
+    {
+        const SkinnedPacket *packet;
+        std::shared_ptr<const std::vector<float>> palette;
+        uint64_t mesh;
+        std::vector<native_renderer::Vertex> out;
+    };
+    class SkinWorker
+    {
+    public:
+        void submit(const SkinnedPacket &packet, std::shared_ptr<const std::vector<float>> palette, uint64_t mesh)
+        {
+            std::unique_ptr<SkinJob> job;
+            if (!spare.empty())
+            {
+                job = std::move(spare.back());
+                spare.pop_back();
+            }
+            else
+                job = std::make_unique<SkinJob>();
+            job->packet = &packet;
+            job->palette = std::move(palette);
+            job->mesh = mesh;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (!started)
+                {
+                    started = true;
+                    std::thread([this] { run(); }).detach();
+                }
+                queue.push_back(job.get());
+            }
+            jobs.push_back(std::move(job));
+            ready.notify_one();
+        }
+        // Waits for this frame's jobs, then uploads them in the order queued.
+        void finish()
+        {
+            if (jobs.empty())
+                return;
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                done.wait(lock, [this] { return completed == jobs.size(); });
+                completed = 0;
+            }
+            for (std::unique_ptr<SkinJob> &job : jobs)
+            {
+                const SkinnedPacket &packet = *job->packet;
+                native_renderer::uploadIndexedMesh(job->mesh, job->out.data(), static_cast<uint32_t>(job->out.size()), packet.triangles.data(),
+                                                   static_cast<uint32_t>(packet.triangles.size()));
+                job->palette.reset();
+                spare.push_back(std::move(job));
+            }
+            jobs.clear();
+        }
+
+    private:
+        void run()
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            for (;;)
+            {
+                ready.wait(lock, [this] { return !queue.empty(); });
+                SkinJob *job = queue.front();
+                queue.pop_front();
+                lock.unlock();
+                const SkinnedPacket &packet = *job->packet;
+                job->out.assign(packet.posed.begin(), packet.posed.end()); // texture coordinates, colours
+                poseSkinned(packet, job->palette->data(), job->out.data(), job->out.size());
+                lock.lock();
+                ++completed;
+                done.notify_one();
+            }
+        }
+
+        std::mutex mutex;
+        std::condition_variable ready, done;
+        std::deque<SkinJob *> queue;
+        size_t completed = 0;
+        bool started = false;
+        std::vector<std::unique_ptr<SkinJob>> jobs, spare; // this frame's, in order (the game thread's)
+    };
+    SkinWorker g_skinWorker;
+
     std::unordered_map<uint64_t, SkinnedPacket> g_skinnedPackets; // by packet
     std::unordered_set<uint64_t> g_litPackets;                        // packets with normals
     uint64_t g_skinnedDraws = 0;                                       // this frame's skinned meshes
@@ -863,6 +1006,7 @@ namespace sotc_native
         g_bloomRan = false;
         // Drawn larger than the PS2's 512 x 448 (F10 / SOTC_RENDER_SCALE): the
         // geometry has no resolution; the effects measure in PS2 pixels.
+        g_skinWorker.finish();
         const float scale = std::clamp(native_renderer::tuning().renderScale, 0.5f, 4.0f);
         native_renderer::endFrame(static_cast<uint32_t>(512.0f * scale + 0.5f), static_cast<uint32_t>(448.0f * scale + 0.5f));
         static const bool show = std::atoi(std::getenv("SOTC_NATIVE")) != 2; // 2: draw, keep the emulated picture
@@ -1852,11 +1996,12 @@ namespace sotc_native
         const uint32_t packets = word(header + 0x60u), count = word(header + 0x64u);
         static std::vector<native_renderer::Vertex> vertices;
         static std::vector<Strip> strips;
-        static std::vector<float> palette;
+        // Shared with the skin worker's jobs of this instance.
+        auto palette = std::make_shared<std::vector<float>>();
         bool hasPalette;
         {
             ps2_stats::TimeInto timed{ps2_stats::nmPaletteUs};
-            hasPalette = !(g_nmBisect & 16u) && readPalette(instance, palette);
+            hasPalette = !(g_nmBisect & 16u) && readPalette(instance, *palette);
         }
         if (g_nmBisect & 8u)
             return;
@@ -1928,45 +2073,9 @@ namespace sotc_native
                 SkinnedPacket &packet = skinnedPacket->second;
                 if (packet.posed.empty())
                     packet.flatten();
-                const float *pal = palette.data();
-                for (size_t i = 0; i < ((g_nmBisect & 1u) ? 0u : packet.bind.size()); ++i)
-                {
-                    const SkinnedPacket::Bind &v = packet.bind[i];
-                    native_renderer::Vertex &o = packet.posed[i];
-#if defined(__ARM_NEON)
-                    // Each bone's matrix columns times (x, y, z, 1): 4 vector
-                    // multiply-adds for the position, 3 for the normal.
-                    float32x4_t position = vdupq_n_f32(0.0f), normal = vdupq_n_f32(0.0f);
-                    for (uint32_t b = 0; b < v.bones; ++b)
-                    {
-                        const float *m = pal + v.matrix[b];
-                        const float32x4_t c0 = vld1q_f32(m), c1 = vld1q_f32(m + 4), c2 = vld1q_f32(m + 8), c3 = vld1q_f32(m + 12);
-                        const float32x4_t p = vmlaq_n_f32(vmlaq_n_f32(vmlaq_n_f32(c3, c0, v.x), c1, v.y), c2, v.z);
-                        const float32x4_t n = vmlaq_n_f32(vmlaq_n_f32(vmulq_n_f32(c0, v.nx), c1, v.ny), c2, v.nz);
-                        position = vmlaq_n_f32(position, p, v.weight[b]);
-                        normal = vmlaq_n_f32(normal, n, v.weight[b]);
-                    }
-                    // Stored from the NEON registers (a lane moved to an ARM
-                    // register stalls the A9): x y z and a lane over nx, then
-                    // nx ny nz.
-                    vst1q_f32(&o.x, position);
-                    vst1_f32(&o.nx, vget_low_f32(normal));
-                    vst1q_lane_f32(&o.nz, normal, 2);
-#else
-                    o.x = o.y = o.z = o.nx = o.ny = o.nz = 0.0f;
-                    for (uint32_t b = 0; b < v.bones; ++b)
-                    {
-                        const float *m = pal + v.matrix[b];
-                        const float w = v.weight[b];
-                        o.x += w * (m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12]);
-                        o.y += w * (m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13]);
-                        o.z += w * (m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14]);
-                        o.nx += w * (m[0] * v.nx + m[4] * v.ny + m[8] * v.nz);
-                        o.ny += w * (m[1] * v.nx + m[5] * v.ny + m[9] * v.nz);
-                        o.nz += w * (m[2] * v.nx + m[6] * v.ny + m[10] * v.nz);
-                    }
-#endif
-                }
+                const bool queued = packet.indexed && !(g_nmBisect & 64u) && !skinSync();
+                if (!queued)
+                    poseSkinned(packet, palette->data(), packet.posed.data(), (g_nmBisect & 1u) ? 0u : packet.bind.size());
                 mesh = (1ull << 63) | g_skinnedDraws++;
                 ps2_stats::skinPosed += packet.bind.size();
                 ++ps2_stats::skinDraws;
@@ -1977,8 +2086,11 @@ namespace sotc_native
                     // (zero-area ones draw nothing).
                     ps2_stats::skinOutput += packet.triangles.size();
                     ++ps2_stats::skinIndexed;
-                    native_renderer::uploadIndexedMesh(mesh, packet.posed.data(), static_cast<uint32_t>(packet.posed.size()), packet.triangles.data(),
-                                                       (g_nmBisect & 2u) ? 0u : static_cast<uint32_t>(packet.triangles.size()));
+                    if (queued)
+                        g_skinWorker.submit(packet, palette, mesh);
+                    else
+                        native_renderer::uploadIndexedMesh(mesh, packet.posed.data(), static_cast<uint32_t>(packet.posed.size()), packet.triangles.data(),
+                                                           (g_nmBisect & 2u) ? 0u : static_cast<uint32_t>(packet.triangles.size()));
                 }
                 else
                 {
