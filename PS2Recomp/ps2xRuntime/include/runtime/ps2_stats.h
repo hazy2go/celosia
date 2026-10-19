@@ -68,7 +68,7 @@ namespace ps2_stats
     }
     inline std::atomic<uint64_t> vifChainUs{0}; // walking a VIF1 DMA chain (native: compacting it)
     inline uint64_t chainWalks = 0, chainTags = 0, chainBytes = 0; // EE thread only
-    inline uint64_t compactorCodes = 0, compactorCopied = 0, gifScannedQwords = 0;
+    inline uint64_t compactorCodes = 0, compactorCopied = 0, gifScannedQwords = 0, refReplays = 0;
     inline std::atomic<uint64_t> vu1SyncWaitUs{0}, vu1SyncWaits{0}, gsPrivReadUs{0}, gsPrivReads{0}; // syncVu1 waits; GS privileged register reads
     inline std::atomic<uint64_t> discReadUs{0}, discReads{0}, discReadBytes{0}; // IOP-side disc file reads
     inline std::atomic<uint64_t> guestModelDispUs{0}, nativeModelUs{0}, dlKickUs{0}, modelDispCalls{0};

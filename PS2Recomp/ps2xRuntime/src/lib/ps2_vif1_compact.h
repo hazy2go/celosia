@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 // VIF1 stream compaction for when no VU1 program runs (GS::skipRaster):
@@ -21,6 +22,13 @@ public:
     Vif1Compactor(uint32_t cycle, std::vector<uint8_t> &out, GifEventScanner &direct)
         : m_cycle(cycle), m_out(out), m_direct(direct) {}
     void feed(const uint8_t *data, uint32_t bytes);
+    // A REF tag's payload (static model packets: ~3.3 MB of the opening's
+    // ~4.2 MB a frame, 99% the same (address, size) frame after frame): its
+    // output, end cycle and skipped bytes recorded the first time, replayed
+    // after while its first and last 16 bytes still match. Not for packets
+    // with GIF data (their events must be scanned) or that do not start and
+    // end on a VIFcode boundary.
+    void feedRef(const uint8_t *data, uint32_t bytes, uint32_t address);
     [[nodiscard]] uint64_t skippedBytes() const { return m_skipped; }
 
 private:
@@ -33,6 +41,17 @@ private:
         std::memcpy(m_out.data() + at, data, bytes);
     }
 
+    struct RefSummary
+    {
+        uint8_t head[16], tail[16];
+        uint32_t entryCycle, exitCycle;
+        uint64_t skipped;
+        std::vector<uint8_t> out;
+    };
+    static std::unordered_map<uint64_t, RefSummary> &refSummaries();
+    bool atCodeBoundary() const { return m_copy == 0u && m_skip == 0u && m_gif == 0u; }
+
+    bool m_sawGif = false;
     uint32_t m_cycle;
     std::vector<uint8_t> &m_out;
     GifEventScanner &m_direct;

@@ -567,9 +567,10 @@ namespace native_renderer
             std::fprintf(stderr, "[chains] per frame: walks %.1f tags %.0f payload %.0f KB\n", ps2_stats::chainWalks / 60.0, ps2_stats::chainTags / 60.0,
                          ps2_stats::chainBytes / 60.0 / 1024.0);
             ps2_stats::chainWalks = ps2_stats::chainTags = ps2_stats::chainBytes = 0;
-            std::fprintf(stderr, "[chains] per frame: VIF codes %.0f, copied %.0f KB, GIF qwords scanned %.0f\n", ps2_stats::compactorCodes / 60.0,
-                         ps2_stats::compactorCopied / 60.0 / 1024.0, ps2_stats::gifScannedQwords / 60.0);
-            ps2_stats::compactorCodes = ps2_stats::compactorCopied = ps2_stats::gifScannedQwords = 0;
+            std::fprintf(stderr, "[chains] per frame: VIF codes %.0f, copied %.0f KB, GIF qwords scanned %.0f, REF packets replayed %.0f\n",
+                         ps2_stats::compactorCodes / 60.0, ps2_stats::compactorCopied / 60.0 / 1024.0, ps2_stats::gifScannedQwords / 60.0,
+                         ps2_stats::refReplays / 60.0);
+            ps2_stats::compactorCodes = ps2_stats::compactorCopied = ps2_stats::gifScannedQwords = ps2_stats::refReplays = 0;
             if (g_ps2GuestInstructions)
             {
                 std::fprintf(stderr, "[guest] per frame: %.2f M MIPS instructions\n", g_ps2GuestInstructions / 60.0 / 1e6);

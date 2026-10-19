@@ -393,7 +393,10 @@ void Vif1Compactor::feed(const uint8_t *data, uint32_t bytes)
             if (nop != 0u || m_out.empty())
                 append(&nop, 4u);
             if (opcode == VIF_DIRECT || opcode == VIF_DIRECTHL)
+            {
                 m_gif = (imm == 0u ? 65536u : imm) * 16u;
+                m_sawGif = true;
+            }
             else
                 m_skip = opcode == VIF_MPG ? (num == 0u ? 256u : num) * 8u : unpackDataBytes(opcode, num, m_cycle);
             continue;
@@ -406,6 +409,56 @@ void Vif1Compactor::feed(const uint8_t *data, uint32_t bytes)
         else if (opcode == VIF_STROW || opcode == VIF_STCOL)
             m_copy = 16u;
     }
+}
+
+std::unordered_map<uint64_t, Vif1Compactor::RefSummary> &Vif1Compactor::refSummaries()
+{
+    static std::unordered_map<uint64_t, RefSummary> summaries;
+    return summaries;
+}
+
+void Vif1Compactor::feedRef(const uint8_t *data, uint32_t bytes, uint32_t address)
+{
+    if (bytes < 64u || !atCodeBoundary() || m_out.empty())
+    {
+        feed(data, bytes);
+        return;
+    }
+    auto &summaries = refSummaries();
+    const uint64_t key = (static_cast<uint64_t>(address) << 20) ^ (static_cast<uint64_t>(bytes) << 4) ^ (static_cast<uint64_t>(m_cycle) << 44);
+    const auto it = summaries.find(key);
+    if (it != summaries.end())
+    {
+        const RefSummary &r = it->second;
+        if (r.entryCycle == m_cycle && std::memcmp(r.head, data, 16) == 0 && std::memcmp(r.tail, data + bytes - 16u, 16) == 0)
+        {
+            if (!r.out.empty())
+                append(r.out.data(), static_cast<uint32_t>(r.out.size()));
+            m_cycle = r.exitCycle;
+            m_skipped += r.skipped;
+            ++ps2_stats::refReplays;
+            return;
+        }
+    }
+    const size_t outStart = m_out.size();
+    const uint64_t skippedStart = m_skipped;
+    const uint32_t entryCycle = m_cycle;
+    m_sawGif = false;
+    feed(data, bytes);
+    if (m_sawGif || !atCodeBoundary())
+    {
+        summaries.erase(key);
+        return;
+    }
+    if (summaries.size() > 65536u)
+        summaries.clear(); // areas come and go: start over rather than grow
+    RefSummary &r = summaries[key];
+    std::memcpy(r.head, data, 16);
+    std::memcpy(r.tail, data + bytes - 16u, 16);
+    r.entryCycle = entryCycle;
+    r.exitCycle = m_cycle;
+    r.skipped = m_skipped - skippedStart;
+    r.out.assign(m_out.begin() + static_cast<std::ptrdiff_t>(outStart), m_out.end());
 }
 
 void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)

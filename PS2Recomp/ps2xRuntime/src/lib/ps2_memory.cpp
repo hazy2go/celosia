@@ -2,6 +2,7 @@
 #include "runtime/ps2_thread_load.h"
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_stats.h"
+#include <unordered_set>
 #include <cstdlib>
 #include <cstdio>
 #include "runtime/ps2_memory.h"
@@ -1673,7 +1674,7 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                     if (gifEventsOnly)
                         m_gifScanned = true;
 
-                    auto appendData = [&](uint32_t srcAddr, uint32_t qwCount)
+                    auto appendData = [&](uint32_t srcAddr, uint32_t qwCount, bool ref = false)
                     {
                         const uint64_t bytes64 = static_cast<uint64_t>(qwCount) * 16ull;
                         uint32_t bytes = (bytes64 > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<uint32_t>(bytes64);
@@ -1702,7 +1703,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                                 chunk = maxSz2 - src;
                             if (chunk == 0)
                                 break;
-                            if (compactor)
+                            if (compactor && ref && chunk == bytes)
+                                compactor->feedRef(base2 + src, chunk, srcAddr);
+                            else if (compactor)
                                 compactor->feed(base2 + src, chunk);
                             else if (gifEventsOnly)
                                 gifEvents.feed(base2 + src, chunk);
@@ -1847,10 +1850,42 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)
                         if (transferTagData)
                             appendVifTagData(currentTagAddr);
 
+                        // PS2X_CHAIN_STATS=1 (analysis): payload bytes by tag id, and
+                        // how much of the REF payload repeats the last frame's (addr, qwc).
+                        static int chainStats = -1;
+                        if (chainStats < 0)
+                            chainStats = std::getenv("PS2X_CHAIN_STATS") ? 1 : 0;
+                        if (chainStats && hasPayload && channelBase == 0x10009000u)
+                        {
+                            static uint64_t byId[8] = {}, refRepeat = 0, refTotal = 0, frames = 0;
+                            static std::unordered_set<uint64_t> lastRefs, refs;
+                            byId[id & 7u] += tagQwc * 16u;
+                            if (id == 3u || id == 4u)
+                            {
+                                const uint64_t key = (static_cast<uint64_t>(dataAddr) << 16) | tagQwc;
+                                refTotal += tagQwc * 16u;
+                                if (lastRefs.count(key))
+                                    refRepeat += tagQwc * 16u;
+                                refs.insert(key);
+                            }
+                            if (endChain || (irq && tieEnabled))
+                            {
+                                lastRefs.swap(refs);
+                                refs.clear();
+                                if (++frames % 60u == 0u)
+                                {
+                                    std::fprintf(stderr, "[chainstats] per frame KB by tag id: cnt %.0f next %.0f ref %.0f refs %.0f call %.0f ret %.0f end %.0f | ref repeating last frame %.0f%%\n",
+                                                 byId[1] / 60.0 / 1024, byId[2] / 60.0 / 1024, byId[3] / 60.0 / 1024, byId[4] / 60.0 / 1024, byId[5] / 60.0 / 1024,
+                                                 byId[6] / 60.0 / 1024, (byId[7] + byId[0]) / 60.0 / 1024, refTotal ? 100.0 * refRepeat / refTotal : 0.0);
+                                    std::memset(byId, 0, sizeof(byId));
+                                    refRepeat = refTotal = 0;
+                                }
+                            }
+                        }
                         if (hasPayload)
                         {
                             ps2_stats::chainBytes += static_cast<uint64_t>(tagQwc) * 16u;
-                            appendData(dataAddr, tagQwc);
+                            appendData(dataAddr, tagQwc, id == 3u || id == 4u);
                         }
                         if (irq && tieEnabled)
                             endChain = true;
