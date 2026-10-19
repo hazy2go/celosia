@@ -24,15 +24,18 @@ std::recursive_mutex &ps2xVitaGlMutex();
 #endif
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdlib>
-#include <array>
 #include <cstring>
 #include <iostream>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -457,6 +460,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             uint32_t lastError = 0;
         } texStats;
         void evictUnused(); // meshes and textures no frame drew for a while
+        std::vector<uint64_t> evictedMeshes, evictedTextures; // since the backend last looked
         std::vector<native_renderer::ScreenBlur> blurs;
         native_renderer::Fog fog;
         native_renderer::Bloom bloom;
@@ -855,6 +859,8 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             {
                 if (m.buffer)
                     glDeleteBuffers(1, &m.buffer);
+                if (!m.dynamic)
+                    evictedMeshes.push_back(it->first);
                 it = meshes.erase(it);
             }
             else
@@ -865,6 +871,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             if (it->second.used < before)
             {
                 glDeleteTextures(1, &it->second.name);
+                evictedTextures.push_back(it->first);
                 it = textures.erase(it);
             }
             else
@@ -1479,24 +1486,36 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         hasOutput = true;
     }
 
+    // On the Vita the frame is drawn on a thread of its own: the game thread
+    // records it (draws, per-frame vertices, passes) and hands it over at
+    // endFrame, so the GL work (~11 ms a frame, vitaGL's cost per draw) runs
+    // on another core while the game goes on. One frame in flight; the game
+    // thread's mesh / texture lookups use sets of its own, so it never reads
+    // maps the render thread changes. PS2X_NATIVE_GL_SYNC=1: draw at endFrame.
     class GlBackend final : public native_renderer::detail::Backend
     {
     public:
-        explicit GlBackend(Renderer *renderer) : r(renderer) {}
+        explicit GlBackend(Renderer *renderer) : r(renderer)
+        {
+#if defined(PS2X_NATIVE_VITA)
+            threaded = std::getenv("PS2X_NATIVE_GL_SYNC") == nullptr;
+            if (threaded)
+                std::thread([this] { renderLoop(); }).detach();
+#endif
+        }
 
-        bool hasMesh(uint64_t id) override { return r->meshes.count(id) != 0; }
+        bool hasMesh(uint64_t id) override { return threaded ? knownMeshes.count(id) != 0 : r->meshes.count(id) != 0; }
         void uploadMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count, bool perFrame) override
         {
             static const bool noArena = std::getenv("SOTC_GL_NOARENA") != nullptr; // debugging: one buffer per mesh
             if (perFrame && !noArena)
             {
-                Mesh &mesh = r->meshes[id];
+                Mesh mesh;
                 mesh.dynamic = true;
-                mesh.indexed = false;
-                mesh.frame = r->arenaFrame;
-                mesh.first = static_cast<uint32_t>(r->arena.size());
+                mesh.first = static_cast<uint32_t>(frame.arena.size());
                 mesh.count = count;
-                r->arena.insert(r->arena.end(), vertices, vertices + count);
+                frame.dynamic.emplace_back(id, mesh);
+                frame.arena.insert(frame.arena.end(), vertices, vertices + count);
                 return;
             }
             Lock lock;
@@ -1508,23 +1527,24 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(count * sizeof(native_renderer::Vertex)), vertices, GL_STATIC_DRAW);
             mesh.count = count;
             mesh.bytes = static_cast<uint64_t>(count) * sizeof(native_renderer::Vertex);
+            knownMeshes.insert(id);
         }
         void uploadIndexedMesh(uint64_t id, const native_renderer::Vertex *vertices, uint32_t count, const uint32_t *indices, uint32_t indexCount) override
         {
-            Mesh &mesh = r->meshes[id];
+            Mesh mesh;
             mesh.dynamic = true;
             mesh.indexed = true;
-            mesh.frame = r->arenaFrame;
-            const uint32_t base = static_cast<uint32_t>(r->arena.size());
-            mesh.first = static_cast<uint32_t>(r->indexArena.size());
+            const uint32_t base = static_cast<uint32_t>(frame.arena.size());
+            mesh.first = static_cast<uint32_t>(frame.indexArena.size());
             mesh.count = indexCount;
-            r->arena.insert(r->arena.end(), vertices, vertices + count);
-            r->indexArena.resize(r->indexArena.size() + indexCount);
-            uint32_t *out = r->indexArena.data() + mesh.first;
+            frame.dynamic.emplace_back(id, mesh);
+            frame.arena.insert(frame.arena.end(), vertices, vertices + count);
+            frame.indexArena.resize(frame.indexArena.size() + indexCount);
+            uint32_t *out = frame.indexArena.data() + mesh.first;
             for (uint32_t i = 0; i < indexCount; ++i)
                 out[i] = base + indices[i];
         }
-        bool hasTexture(uint64_t id) override { return r->textures.count(id) != 0; }
+        bool hasTexture(uint64_t id) override { return threaded ? knownTextures.count(id) != 0 : r->textures.count(id) != 0; }
         void uploadTexture(uint64_t key, uint32_t width, uint32_t height, const uint8_t *rgba, uint32_t levels) override
         {
             if (!width || !height)
@@ -1559,14 +1579,15 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
             t.wrapS = t.wrapT = GL_REPEAT;
+            knownTextures.insert(key);
         }
         void beginFrame() override
         {
-            r->draws.clear();
-            r->arena.clear();
-            r->indexArena.clear();
-            ++r->arenaFrame;
-            r->blurs.clear();
+            frame.draws.clear();
+            frame.arena.clear();
+            frame.indexArena.clear();
+            frame.dynamic.clear();
+            frame.blurs.clear();
         }
         void draw(uint64_t mesh, const float clip[16], const native_renderer::DrawState &state) override
         {
@@ -1574,18 +1595,36 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             d.mesh = mesh;
             d.state = state;
             std::memcpy(d.clip, clip, sizeof(d.clip));
-            r->draws.push_back(d);
+            frame.draws.push_back(d);
         }
-        void setFog(const native_renderer::Fog &fog) override { r->fog = fog; }
-        void setBloom(const native_renderer::Bloom &bloom) override { r->bloom = bloom; }
-        void addScreenBlur(const native_renderer::ScreenBlur &blur) override { r->blurs.push_back(blur); }
-        void setGlowComposite(const native_renderer::GlowComposite &glow) override { r->glow = glow; }
-        void setDepthOfField(const native_renderer::DepthOfField &dof) override { r->dof = dof; }
+        void setFog(const native_renderer::Fog &fog) override { frame.fog = fog; }
+        void setBloom(const native_renderer::Bloom &bloom) override { frame.bloom = bloom; }
+        void addScreenBlur(const native_renderer::ScreenBlur &blur) override { frame.blurs.push_back(blur); }
+        void setGlowComposite(const native_renderer::GlowComposite &glow) override { frame.glow = glow; }
+        void setDepthOfField(const native_renderer::DepthOfField &dof) override { frame.dof = dof; }
         void endFrame(uint32_t width, uint32_t height) override
         {
-            Lock lock;
-            r->render(width, height);
-            r->evictUnused();
+            if (!threaded)
+            {
+                Lock lock;
+                handOver();
+                r->render(width, height);
+                r->evictUnused();
+                return;
+            }
+            std::unique_lock<std::mutex> lock(jobMutex);
+            jobDone.wait(lock, [this] { return !jobPending; }); // the last frame drawn
+            for (uint64_t id : r->evictedMeshes)
+                knownMeshes.erase(id);
+            for (uint64_t id : r->evictedTextures)
+                knownTextures.erase(id);
+            r->evictedMeshes.clear();
+            r->evictedTextures.clear();
+            handOver();
+            jobWidth = width;
+            jobHeight = height;
+            jobPending = true;
+            jobReady.notify_one();
         }
         bool latestFrame(std::vector<uint8_t> &rgba, uint32_t &width, uint32_t &height) override
         {
@@ -1606,7 +1645,74 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
             std::lock_guard<std::recursive_mutex> guard{ps2xVitaGlMutex()};
 #endif
         };
+        // What the game thread records for a frame.
+        struct Frame
+        {
+            std::vector<Draw> draws;
+            std::vector<native_renderer::Vertex> arena;
+            std::vector<uint32_t> indexArena;
+            std::vector<std::pair<uint64_t, Mesh>> dynamic;
+            std::vector<native_renderer::ScreenBlur> blurs;
+            native_renderer::Fog fog;
+            native_renderer::Bloom bloom;
+            native_renderer::GlowComposite glow;
+            native_renderer::DepthOfField dof;
+        };
+        // The recorded frame into the renderer (it is not drawing: before
+        // the render thread's job, or on this thread).
+        void handOver()
+        {
+            ++r->arenaFrame;
+            std::swap(r->draws, frame.draws);
+            std::swap(r->arena, frame.arena);
+            std::swap(r->indexArena, frame.indexArena);
+            std::swap(r->blurs, frame.blurs);
+            r->fog = frame.fog;
+            r->bloom = frame.bloom;
+            r->glow = frame.glow;
+            r->dof = frame.dof;
+            for (auto &[id, mesh] : frame.dynamic)
+            {
+                Mesh &m = r->meshes[id];
+                m.dynamic = true;
+                m.indexed = mesh.indexed;
+                m.first = mesh.first;
+                m.count = mesh.count;
+                m.frame = r->arenaFrame;
+            }
+        }
+        void renderLoop()
+        {
+            for (;;)
+            {
+                uint32_t width, height;
+                {
+                    std::unique_lock<std::mutex> lock(jobMutex);
+                    jobReady.wait(lock, [this] { return jobPending; });
+                    width = jobWidth;
+                    height = jobHeight;
+                }
+                {
+                    Lock lock;
+                    r->render(width, height);
+                    r->evictUnused();
+                }
+                {
+                    std::lock_guard<std::mutex> lock(jobMutex);
+                    jobPending = false;
+                }
+                jobDone.notify_one();
+            }
+        }
+
         Renderer *r;
+        Frame frame;
+        bool threaded = false;
+        std::unordered_set<uint64_t> knownMeshes, knownTextures; // the game thread's
+        std::mutex jobMutex;
+        std::condition_variable jobReady, jobDone;
+        bool jobPending = false;
+        uint32_t jobWidth = 0, jobHeight = 0;
     };
 }
 
