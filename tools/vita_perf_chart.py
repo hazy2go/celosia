@@ -15,6 +15,7 @@ BUILDS = [
     ("display-list walk", 193),
     ("compact memory access", 163),
     ("less bookkeeping", 153),
+    ("static packets cached", 131),
 ]
 TARGET_MS = 33.3
 
