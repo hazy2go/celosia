@@ -6,6 +6,7 @@
 #include "ps2recomp/r5900_decoder.h"
 #include "ps2recomp/recompiler_reporter.h"
 #include "ps2recomp/types.h"
+#include "ps2recomp/vu_norm_cache.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -178,6 +179,10 @@ namespace ps2recomp
         ss << "#ifdef PS2_FUNCTION_LOG_TRACKER\n";
         ss << "    PS_LOG_ENTRY(\"" << sanitizedName << "\");\n";
         ss << "#endif\n";
+        const bool vuCache = vuNormCacheEnabled();
+        VuNormCache vuNorm;
+        if (vuCache)
+            ss << "    /*VU_NORM_DECL*/\n";
         ss << "\n";
         if (!resumeTargets.empty())
         {
@@ -201,6 +206,7 @@ namespace ps2recomp
             if (internalTargets.contains(inst.address))
             {
                 constantRegisters.clear();
+                vuNorm.forget();
                 ss << "label_" << std::hex << inst.address << std::dec << ":\n";
             }
 
@@ -261,6 +267,7 @@ namespace ps2recomp
                             ss << countOp(inst, countFunction) << countOp(*delaySlot, countFunction);
                         ss << cg.handleBranchDelaySlots(inst, *delaySlot, function, analysisResult);
                     }
+                    vuNorm.forget();
 
                     if (hasDecodedDelaySlot)
                     {
@@ -289,6 +296,7 @@ namespace ps2recomp
                         }
 
                         updateConstantRegisters(inst, constantRegisters);
+                        vuNorm.forget();
                         continue;
                     }
 
@@ -297,7 +305,9 @@ namespace ps2recomp
                     if (countOps)
                         ss << countOp(inst, countFunction);
                     const MemoryAccessHint memoryHint = resolveMemoryAccessHint(inst, constantRegisters);
-                    const std::string translated = cg.translateInstruction(inst, memoryHint);
+                    std::string translated = cg.translateInstruction(inst, memoryHint);
+                    if (vuCache)
+                        translated = vuNorm.apply(translated);
                     if (translationObservesPc(translated))
                         ss << "    ctx->pc = 0x" << std::hex << inst.address << "u;\n"
                            << std::dec;
@@ -338,6 +348,14 @@ namespace ps2recomp
         }
 
         ss << "}\n";
-        return leanGprsEnabled() ? leanGprs(ss.str()) : ss.str();
+        std::string code = ss.str();
+        if (vuCache)
+        {
+            const std::string marker = "    /*VU_NORM_DECL*/\n";
+            const size_t at = code.find(marker);
+            if (at != std::string::npos)
+                code.replace(at, marker.size(), vuNorm.declarations());
+        }
+        return leanGprsEnabled() ? leanGprs(code) : code;
     }
 }

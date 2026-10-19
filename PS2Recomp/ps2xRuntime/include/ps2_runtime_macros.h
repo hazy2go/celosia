@@ -10,6 +10,7 @@
 #endif
 #endif
 #include <cstdint>
+#include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <bit>
@@ -221,6 +222,21 @@ static PS2_FORCE_INLINE uint32_t ps2VuClipFlags(__m128 fsv, __m128 ftv)
 #define PS2_VADD(a, b) ps2VuNormalize(_mm_add_ps(ps2VuNormalize((__m128)(a)), ps2VuNormalize((__m128)(b))))
 #define PS2_VSUB(a, b) ps2VuNormalize(_mm_sub_ps(ps2VuNormalize((__m128)(a)), ps2VuNormalize((__m128)(b))))
 #define PS2_VMUL(a, b) ps2VuNormalize(_mm_mul_ps(ps2VuNormalize((__m128)(a)), ps2VuNormalize((__m128)(b))))
+// Inputs already normalized (CELOSIA_VU_NORM_CSE): the result only.
+#define PS2_VADD_PRE(a, b) ps2VuNormalize(_mm_add_ps((__m128)(a), (__m128)(b)))
+#define PS2_VSUB_PRE(a, b) ps2VuNormalize(_mm_sub_ps((__m128)(a), (__m128)(b)))
+#define PS2_VMUL_PRE(a, b) ps2VuNormalize(_mm_mul_ps((__m128)(a), (__m128)(b)))
+// CELOSIA_VU_NORM_VERIFY builds: a cached normalized value against its register.
+[[gnu::noinline]] inline void ps2VuNormCheck(__m128 cached, __m128 reg, int which)
+{
+    const __m128 fresh = ps2VuNormalize(reg);
+    if (std::memcmp(&cached, &fresh, sizeof(cached)) != 0)
+    {
+        static uint64_t mismatches = 0;
+        if (++mismatches <= 20u || mismatches % 1000u == 0u)
+            std::fprintf(stderr, "[vu-norm-check] mismatch #%llu on %s%d\n", static_cast<unsigned long long>(mismatches), which == 32 ? "acc" : "vf", which == 32 ? 0 : which);
+    }
+}
 #define PS2_VDIV(a, b) _mm_div_ps((__m128)(a), (__m128)(b))
 #define PS2_VMULQ(a, q) _mm_mul_ps((__m128)(a), _mm_set1_ps(q))
 #define PS2_VBLEND(a, b, mask) PS2_BLENDV_PS((__m128)(a), (__m128)(b), (__m128)(mask))
