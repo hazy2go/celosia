@@ -584,6 +584,7 @@ PS2Runtime::PS2Runtime()
     m_iopSubsystem = std::make_unique<ps2x::iop::IopSubsystem>(*m_iopHost);
 
     m_eeScheduler = std::make_unique<EeScheduler>(*this);
+    m_unwindingFlag = &m_eeScheduler->unwindingFlag();
 
     // Assign rather than memset: R5900Context's constructor zeroes itself and
     // then applies the COP0 reset values, which a memset here would discard.
@@ -1708,10 +1709,6 @@ namespace
         return g_dispatcherProfileState == 1;
     }
 
-    // Guest jumps dispatched (see dispatchGuestBranch); guest code runs on
-    // the EE scheduler's executor thread only (not thread_local: emutls on
-    // the Vita).
-    uint64_t t_guestJumpSerial = 0;
 }
 
 bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
@@ -1731,19 +1728,17 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // As at loop edges, the scheduler is asked every few calls with their
     // cycles together (~30k guest calls a frame on the Vita, the check a
     // call of its own each time).
-    static uint32_t callsSinceCheck = 0;
-    constexpr uint32_t kCallsPerCheck = 4u;
-    if (++callsSinceCheck >= kCallsPerCheck)
+    if (++g_ps2CallsSinceCheck >= kPs2CallsPerCheck)
     {
-        callsSinceCheck = 0;
-        if (m_eeScheduler && m_eeScheduler->checkpointDue(kCallsPerCheck * EeScheduler::kGuestDispatchCycles))
+        g_ps2CallsSinceCheck = 0;
+        if (m_eeScheduler && m_eeScheduler->checkpointDue(kPs2CallsPerCheck * EeScheduler::kGuestDispatchCycles))
             return false;
     }
 
     ++ps2_stats::guestCalls;
     if (!isCall)
     {
-        ++t_guestJumpSerial;
+        ++g_ps2GuestJumpSerial;
         if (!hasFunction(targetPc))
         {
             reportMissingFunction(rdram, ctx, targetPc, sourcePc, kind, debugName);
@@ -1791,7 +1786,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     if (targetFn == nullptr)
         targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
-    const uint64_t jumpSerial = t_guestJumpSerial;
+    const uint64_t jumpSerial = g_ps2GuestJumpSerial;
     const uint64_t instructionsBefore = g_ps2GuestInstructions;
     targetFn(rdram, ctx, this);
     // Counting builds (PS2X_COUNT_DUMP): a call's instructions with its callees'.
@@ -1809,7 +1804,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
     // pc -- unless a guest jump ran inside it: a tail jump back to that entry
     // (SotC's script system: SCRFuncSubFunc -> j execSCRBaseFunc) must be
     // dispatched, not taken as a return (found by LightVelox/sotc-pc).
-    if (ctx->pc == entryPc && jumpSerial == t_guestJumpSerial)
+    if (ctx->pc == entryPc && jumpSerial == g_ps2GuestJumpSerial)
     {
         ctx->pc = fallthroughPc;
     }
@@ -1838,6 +1833,16 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         }
     }
     return ctx->pc == fallthroughPc;
+}
+
+bool PS2Runtime::finishCall(R5900Context *ctx, uint32_t target, uint32_t returnPc, uint64_t jumpSerial)
+{
+    // As dispatchGuestBranch after its call.
+    if (m_stopRequested.load(std::memory_order_relaxed) || ctx->pc == 0u || (m_eeScheduler && m_eeScheduler->unwinding()))
+        return false;
+    if (ctx->pc == target && jumpSerial == g_ps2GuestJumpSerial)
+        ctx->pc = returnPc;
+    return ctx->pc == returnPc;
 }
 
 void PS2Runtime::SignalException(R5900Context *ctx, PS2Exception exception)

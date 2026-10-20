@@ -285,6 +285,10 @@ public:
     {
         return m_unwinding;
     }
+    [[nodiscard]] const bool &unwindingFlag() const noexcept
+    {
+        return m_unwinding;
+    }
 
     // Kernel object API. All calls except postEvent/requestStop execute on the
     // EE executor and therefore need no host synchronization.

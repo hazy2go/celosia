@@ -6,8 +6,10 @@
 #include "ps2_runtime_calls.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <sstream>
+#include <string>
 #include <utility>
 
 namespace ps2recomp
@@ -201,14 +203,21 @@ namespace ps2recomp
                                                        std::string_view indent,
                                                        bool returnOnTransfer)
     {
-        m_ss << fmt::format(
-            "{}if (!runtime->dispatchGuestBranch(rdram, ctx, {}, 0x{:X}u, 0x{:X}u, PS2Runtime::GuestBranchKind::{}, \"{}\")) {{\n",
-            indent,
-            targetExpression,
-            sourcePc,
-            returnPc,
-            runtimeKind,
-            debugName);
+        // Calls take ps2Call / ps2CallIndirect: the dispatcher's common case
+        // in place (CELOSIA_INLINE_CALLS=0 at recompile time: the dispatcher).
+        static const bool inlineCalls = !std::getenv("CELOSIA_INLINE_CALLS") || std::string(std::getenv("CELOSIA_INLINE_CALLS")) != "0";
+        if (inlineCalls && (runtimeKind == "DirectCall" || runtimeKind == "IndirectCall") && returnPc == sourcePc + 8u)
+            m_ss << fmt::format("{}if (!{}(rdram, ctx, runtime, {}, 0x{:X}u)) {{\n", indent, runtimeKind == "DirectCall" ? "ps2Call" : "ps2CallIndirect",
+                                targetExpression, returnPc);
+        else
+            m_ss << fmt::format(
+                "{}if (!runtime->dispatchGuestBranch(rdram, ctx, {}, 0x{:X}u, 0x{:X}u, PS2Runtime::GuestBranchKind::{}, \"{}\")) {{\n",
+                indent,
+                targetExpression,
+                sourcePc,
+                returnPc,
+                runtimeKind,
+                debugName);
         if (returnOnTransfer)
         {
             m_ss << fmt::format("{}    return;\n", indent);

@@ -432,6 +432,13 @@ public:
 
     EeScheduler &eeScheduler();
     const EeScheduler &eeScheduler() const;
+    // For ps2Call: nothing stops or unwinds the guest's frames right now.
+    bool guestFlowIntact() const
+    {
+        return !m_stopRequested.load(std::memory_order_relaxed) && !*m_unwindingFlag;
+    }
+    // ps2Call's uncommon end of a call (see dispatchGuestBranch).
+    bool finishCall(R5900Context *ctx, uint32_t target, uint32_t returnPc, uint64_t jumpSerial);
     void postEeEvent(EeEvent event);
     bool eeCheckpointDue(uint32_t cycles = 32u) noexcept;
     [[noreturn]] void eeWaitVSyncTicks(uint32_t ticks, uint32_t resumePc);
@@ -542,6 +549,8 @@ private:
     VU1Interpreter m_vu1{VU1Interpreter::Unit::VU1};
     R5900Context m_cpuContext;
     std::unique_ptr<EeScheduler> m_eeScheduler;
+    static constexpr bool kNotUnwinding = false;
+    const bool *m_unwindingFlag = &kNotUnwinding; // the scheduler's, once it exists
     mutable std::mutex m_eeKernelStateMutex;
     std::unordered_map<int, std::vector<EeExitHandlerRegistration>> m_eeExitHandlers;
     std::unordered_map<uint32_t, uint32_t> m_eeSyscallOverrides;
@@ -634,6 +643,41 @@ inline void ps2TransferTo(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime
         ~Nested() { --g_ps2TransferDepth; }
     } nested;
     fn(rdram, ctx, runtime);
+}
+
+// A guest call (jal, jalr) in generated code: the dispatcher's common case in
+// place (the function from the table, called, back at the return address;
+// ~30k-85k calls a frame, each a dispatcher call of ~50 instructions). Every
+// kPs2CallsPerCheck-th call, a target without a function, and anything
+// unusual after it (a stop, an unwind, a tail jump back to its entry) take
+// dispatchGuestBranch as before. Guest code runs on one thread.
+inline constexpr uint32_t kPs2CallsPerCheck = 4u;
+inline uint32_t g_ps2CallsSinceCheck = 0; // the dispatcher's count too
+inline uint64_t g_ps2GuestJumpSerial = 0; // guest jumps dispatched (dispatchGuestBranch)
+template <PS2Runtime::GuestBranchKind Kind>
+inline bool ps2CallThroughTable(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t target, uint32_t returnPc)
+{
+    const uint32_t slot = (target - g_ps2RecompiledFunctionTableBase) >> 2;
+    PS2Runtime::RecompiledFunction fn = nullptr;
+    if (g_ps2CallsSinceCheck + 1u >= kPs2CallsPerCheck || slot >= g_ps2RecompiledFunctionTableSlotCount ||
+        (fn = g_ps2RecompiledFunctionTable[slot]) == nullptr)
+        return runtime->dispatchGuestBranch(rdram, ctx, target, returnPc - 8u, returnPc, Kind,
+                                            Kind == PS2Runtime::GuestBranchKind::DirectCall ? "JAL" : "JALR");
+    ++g_ps2CallsSinceCheck;
+    ctx->pc = target;
+    const uint64_t jumpSerial = g_ps2GuestJumpSerial;
+    fn(rdram, ctx, runtime);
+    if (ctx->pc == returnPc && runtime->guestFlowIntact())
+        return true;
+    return runtime->finishCall(ctx, target, returnPc, jumpSerial);
+}
+inline bool ps2Call(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t target, uint32_t returnPc)
+{
+    return ps2CallThroughTable<PS2Runtime::GuestBranchKind::DirectCall>(rdram, ctx, runtime, target, returnPc);
+}
+inline bool ps2CallIndirect(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime, uint32_t target, uint32_t returnPc)
+{
+    return ps2CallThroughTable<PS2Runtime::GuestBranchKind::IndirectCall>(rdram, ctx, runtime, target, returnPc);
 }
 
 #endif // PS2_RUNTIME_H
