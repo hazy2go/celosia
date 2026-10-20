@@ -1250,7 +1250,10 @@ inline uint64_t g_ps2GuestInstructions = 0;
 // by PS2X_COUNT_DUMP=<file>.
 inline uint64_t g_ps2OpCounts[1024] = {};
 inline uint64_t g_ps2FunctionCounts[65536] = {};
-#define PS2_COUNT_OP(op, fn) (++g_ps2OpCounts[(op) & 1023u], ++g_ps2FunctionCounts[(fn) & 65535u])
+// And per call target (pc / 4, 32 MB), a call's instructions with its callees'.
+constexpr uint32_t kPs2InclusiveSlots = 1u << 23;
+inline uint64_t *g_ps2InclusiveCounts = nullptr; // allocated by PS2X_COUNT_DUMP
+#define PS2_COUNT_OP(op, fn) (++g_ps2OpCounts[(op) & 1023u], ++g_ps2FunctionCounts[(fn) & 65535u], ++g_ps2GuestInstructions)
 #define PS2_SX32(v) static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(v)))
 #define PS2_ZX32(v) static_cast<uint64_t>(static_cast<uint32_t>(v))
 

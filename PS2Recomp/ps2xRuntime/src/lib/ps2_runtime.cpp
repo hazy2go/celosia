@@ -1792,7 +1792,11 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
         targetFn = lookupFunction(targetPc);
     const uint32_t entryPc = ctx->pc;
     const uint64_t jumpSerial = t_guestJumpSerial;
+    const uint64_t instructionsBefore = g_ps2GuestInstructions;
     targetFn(rdram, ctx, this);
+    // Counting builds (PS2X_COUNT_DUMP): a call's instructions with its callees'.
+    if (g_ps2InclusiveCounts && g_ps2GuestInstructions != instructionsBefore)
+        g_ps2InclusiveCounts[(targetPc >> 2) & (kPs2InclusiveSlots - 1u)] += g_ps2GuestInstructions - instructionsBefore;
 
     // While unwinding to the scheduler, ctx->pc is where the deepest pending
     // call resumes; it can equal this callee's entry in recursive code.
@@ -3004,6 +3008,7 @@ void PS2Runtime::run()
     // counts, "op <id> <n>" and "fn <id> <n>".
     if (const char *countPath = std::getenv("PS2X_COUNT_DUMP"))
     {
+        g_ps2InclusiveCounts = new uint64_t[kPs2InclusiveSlots]();
         std::thread([path = std::string(countPath)]()
                     {
             for (;;)
@@ -3019,6 +3024,9 @@ void PS2Runtime::run()
                     for (uint32_t i = 0; i < 65536u; ++i)
                         if (g_ps2FunctionCounts[i])
                             std::fprintf(f, "fn %u %llu\n", i, static_cast<unsigned long long>(g_ps2FunctionCounts[i]));
+                    for (uint32_t i = 0; i < kPs2InclusiveSlots; ++i)
+                        if (g_ps2InclusiveCounts && g_ps2InclusiveCounts[i])
+                            std::fprintf(f, "inc %x %llu\n", i << 2, static_cast<unsigned long long>(g_ps2InclusiveCounts[i]));
                     std::fclose(f);
                     std::rename(tmp.c_str(), path.c_str());
                 }

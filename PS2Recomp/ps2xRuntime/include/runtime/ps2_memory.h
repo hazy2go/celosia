@@ -8,6 +8,7 @@
 #include <vector>
 #include <unordered_map>
 #include <atomic>
+#include <memory>
 #include <iostream>
 #include <mutex>
 #include <new>
@@ -468,12 +469,27 @@ public:
     bool m_vif1PendingPath2DirectHl = false;
     std::vector<std::vector<uint8_t>> m_path3MaskedFifo;
 
+    // A DMA chain walk: its start (in) and the channel's end registers and
+    // gathered data (out). See walkDmaChain.
+    struct ChainWalk
+    {
+        uint32_t channelBase = 0, chcr = 0, startTag = 0, tagAddr = 0, asr0 = 0, asr1 = 0;
+        bool eventsOnly = false;
+        std::vector<uint8_t> chainBuf;
+    };
+    void walkDmaChain(ChainWalk &walk);
+    void applyChainWalk(const ChainWalk &walk);
+    void applyAsyncChainWalk();
+    std::mutex m_asyncWalkMutex;
+    std::shared_ptr<ChainWalk> m_asyncWalkDone;
+    std::atomic<bool> m_asyncWalkReady{false};
     struct PendingTransfer
     {
         bool fromScratchpad = false;
         uint32_t srcAddr = 0;
         uint32_t qwc = 0;
         std::vector<uint8_t> chainData;
+        std::shared_ptr<ChainWalk> deferredWalk; // a VIF1 chain the VU1 worker walks
     };
     std::vector<PendingTransfer> m_pendingGifTransfers;
     std::vector<PendingTransfer> m_pendingVif0Transfers;
