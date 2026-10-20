@@ -7,6 +7,7 @@
 #include <vitaGL.h>
 #include <psp2/ctrl.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/threadmgr.h>
 #include <psp2/power.h>
 #include <psp2/touch.h>
 
@@ -131,6 +132,14 @@ void InitWindow(int, int, const char *)
     scePowerSetGpuXbarClockFrequency(166);
     std::fprintf(stderr, "[vita] clocks arm=%d bus=%d gpu=%d xbar=%d MHz\n", scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(),
                  scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency());
+    {
+        SceKernelThreadInfo info;
+        std::memset(&info, 0, sizeof(info));
+        info.size = sizeof(info);
+        sceKernelGetThreadInfo(sceKernelGetThreadId(), &info);
+        std::fprintf(stderr, "[thread] main: affinity %x (initial %x), cpu %d, priority %d\n", info.currentCpuAffinityMask, info.initCpuAffinityMask,
+                     info.currentCpuId, info.currentPriority);
+    }
     runVitaMicrobench();
     if (SDL_Init(SDL_INIT_AUDIO) != 0)
         std::fprintf(stderr, "[vita] SDL_Init failed: %s\n", SDL_GetError());

@@ -8,10 +8,13 @@
 #include "ps2_fpu_neon.h"
 
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/sysmem.h>
 
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -212,6 +215,63 @@ void runVitaMicrobench()
                      (t1 - t0) * 1000.0 / iterations, (t2 - t1) * 1000.0 / iterations, static_cast<double>(t1 - t0) / std::max<uint64_t>(1, t2 - t1),
                      same ? "identical" : "DIFFERENT", static_cast<unsigned long long>(GPR_U64(&leanCtx, 2)), static_cast<unsigned long long>(GPR_U64(&leanCtx, 6)),
                      leanCtx.pc);
+    }
+    // Random dependent reads (one per 64-byte line) over a buffer: the
+    // latency of a guest RAM access that misses the caches, by where the
+    // memory comes from (the heap's pages, a memory block's, a physically
+    // contiguous block's: TLB reach).
+    {
+        auto chase = [](uint32_t *buf, uint32_t bytes) -> double
+        {
+            const uint32_t nodes = bytes / 64u;
+            std::vector<uint32_t> order(nodes);
+            for (uint32_t i = 0; i < nodes; ++i)
+                order[i] = i;
+            uint32_t seed = 12345u;
+            for (uint32_t i = nodes - 1u; i > 0; --i)
+            {
+                seed = seed * 1664525u + 1013904223u;
+                std::swap(order[i], order[seed % (i + 1u)]);
+            }
+            for (uint32_t i = 0; i < nodes; ++i)
+                buf[order[i] * 16u] = order[(i + 1u) % nodes] * 16u;
+            constexpr uint32_t kSteps = 2u * 1024u * 1024u;
+            uint32_t at = order[0] * 16u;
+            const uint64_t start = nowUs();
+            for (uint32_t i = 0; i < kSteps; ++i)
+                at = buf[at];
+            const uint64_t us = nowUs() - start;
+            sink(at);
+            return us * 1000.0 / kSteps;
+        };
+        constexpr uint32_t kBig = 32u << 20;
+        if (auto *heap = static_cast<uint32_t *>(std::malloc(kBig)))
+        {
+            for (uint32_t mb : {1u, 2u, 4u, 8u, 16u, 32u})
+                std::fprintf(stderr, "[microbench] random read, %2u MB of heap:              %6.1f ns\n", mb, chase(heap, mb << 20));
+            std::free(heap);
+        }
+        const struct
+        {
+            const char *name;
+            SceKernelMemBlockType type;
+        } blocks[] = {{"USER_RW", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW},
+                      {"USER_MAIN_GAME_RW", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_GAME_RW},
+                      {"USER_MAIN_PHYCONT_RW", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW},
+                      {"USER_CDRAM_L1WBWA_RW", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_L1WBWA_RW}};
+        for (const auto &b : blocks)
+            for (uint32_t mb : {4u, 8u, 16u, 32u})
+            {
+                const SceUID block = sceKernelAllocMemBlock("chase", b.type, mb << 20, nullptr);
+                void *base = nullptr;
+                if (block < 0 || sceKernelGetMemBlockBase(block, &base) < 0)
+                {
+                    std::fprintf(stderr, "[microbench] random read, %2u MB %-22s no block (0x%x)\n", mb, b.name, static_cast<unsigned>(block));
+                    continue;
+                }
+                std::fprintf(stderr, "[microbench] random read, %2u MB %-22s %6.1f ns\n", mb, b.name, chase(static_cast<uint32_t *>(base), mb << 20));
+                sceKernelFreeMemBlock(block);
+            }
     }
     std::fprintf(stderr, "[microbench] %u ops each, ns per op (the loop's own cost included):\n", kOps);
     for (int i = 0; i < count; ++i)

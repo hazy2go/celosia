@@ -30,6 +30,7 @@
 #include "runtime/gs/ps2_gs_psmt8.h"
 #include "runtime/ps2_counters.h"
 #include "runtime/ps2_stats.h"
+#include "ThreadNaming.h"
 
 #include <algorithm>
 #include <chrono>
@@ -817,6 +818,7 @@ namespace sotc_native
     private:
         void run()
         {
+            ThreadNaming::SetCurrentThreadName("Skin");
             std::unique_lock<std::mutex> lock(mutex);
             for (;;)
             {

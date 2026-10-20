@@ -9,6 +9,7 @@
 // and stencil (nothing to attach); no depth textures, so the passes that read
 // depth (bloom mask, depth of field) are left out there for now.
 #include "native_backend.h"
+#include "ThreadNaming.h"
 #include "runtime/native_tuning.h"
 
 #if defined(__APPLE__) || (defined(__vita__) && defined(PS2X_VITA_SDL2_SHIM))
@@ -1683,6 +1684,7 @@ float4 main(float4 vUV : TEXCOORD0, uniform sampler2D uSrc, uniform sampler2D uS
         }
         void renderLoop()
         {
+            ThreadNaming::SetCurrentThreadName("NativeGL");
             for (;;)
             {
                 uint32_t width, height;

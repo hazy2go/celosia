@@ -22,6 +22,12 @@ extern "C"
     __declspec(dllimport) void *WINAPI GetProcAddress(HMODULE hModule, const char *lpProcName);
     __declspec(dllimport) HANDLE WINAPI GetCurrentThread(void);
 }
+#elif defined(__vita__)
+#include <psp2/kernel/cpu.h>
+#include <psp2/kernel/threadmgr.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #elif defined(__APPLE__) || defined(__linux__)
 #include <pthread.h>
 #if defined(__APPLE__)
@@ -55,6 +61,28 @@ namespace ThreadNaming
 
 #elif defined(__linux__)
         pthread_setname_np(pthread_self(), name.data());
+#elif defined(__vita__)
+        // Where the emulation threads run: logged, and with PS2X_PIN_THREADS=1
+        // given a core each (the game thread one of its own, the native GL
+        // thread another, the workers the third).
+        const SceUID id = sceKernelGetThreadId();
+        SceKernelThreadInfo info;
+        std::memset(&info, 0, sizeof(info));
+        info.size = sizeof(info);
+        sceKernelGetThreadInfo(id, &info);
+        int mask = 0;
+        if (const char *pin = std::getenv("PS2X_PIN_THREADS"); pin && std::atoi(pin) != 0)
+        {
+            if (name == "GameThread")
+                mask = SCE_KERNEL_CPU_MASK_USER_0;
+            else if (name == "NativeGL")
+                mask = SCE_KERNEL_CPU_MASK_USER_1;
+            else
+                mask = SCE_KERNEL_CPU_MASK_USER_2;
+            sceKernelChangeThreadCpuAffinityMask(id, mask);
+        }
+        std::fprintf(stderr, "[thread] %.*s: affinity %x (initial %x), cpu %d, priority %d%s\n", static_cast<int>(name.size()), name.data(),
+                     info.currentCpuAffinityMask, info.initCpuAffinityMask, info.currentCpuId, info.currentPriority, mask ? ", pinned" : "");
 #endif
     }
 }
